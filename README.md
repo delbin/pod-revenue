@@ -53,6 +53,21 @@ Note: xPOD is an ERC-4626 vault. When someone pays with xPOD the contract redeem
 emits `APICreditsPurchased` with `paymentToken = POD`, so such a payment lands on the **POD** rail at
 the redeemed amount — it never appears as xPOD.
 
+### Two USD figures
+
+Every amount shows **today's value** first, then the **value at the time of payment** in parentheses
+behind an ⓘ (hover or keyboard-focus shows "value at time of payment"):
+
+```
+$4.74 ($5.06 ⓘ)
+```
+
+- Current: amount × latest CoinGecko price (refreshed every 60s).
+- At payment: amount × the CoinGecko sample nearest that block
+  (`/coins/{id}/market_chart/range`, ±30 min window; hourly granularity here). Successful lookups are
+  cached permanently in `localStorage` — the past doesn't change.
+- The headline total carries both, and only shows the historical figure when every priced payment has one.
+
 ### Failure behaviour
 
 Blockscout unreachable → last good response from `localStorage` → bundled fixture, with a banner

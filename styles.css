@@ -29,7 +29,7 @@
 
 * { box-sizing: border-box; }
 
-html, body { margin: 0; padding: 0; }
+html, body { margin: 0; padding: 0; overflow-x: hidden; }
 
 body {
   background: var(--bg);
@@ -302,3 +302,36 @@ h1 {
 
 /* unpriced rails are labelled, not dashed out */
 .muted-small { font-size: 11px; color: var(--muted); letter-spacing: 0.04em; }
+
+/* ---------- value now + value at time of payment ---------- */
+.usd-now { font-variant-numeric: tabular-nums; }
+.then {
+  font-size: 11px; color: var(--muted); white-space: nowrap;
+  font-family: var(--mono); font-variant-numeric: tabular-nums; letter-spacing: 0;
+}
+.info {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 13px; height: 13px; margin-left: 3px; padding: 0;
+  border-radius: 50%; border: 1px solid var(--line-strong); background: transparent;
+  color: var(--muted); font-family: Georgia, "Times New Roman", serif; font-style: italic;
+  font-size: 9px; line-height: 1; cursor: help; vertical-align: 1px;
+}
+.info:hover, .info:focus-visible { color: var(--cyan); border-color: var(--cyan); outline: none; }
+.info:focus-visible { box-shadow: 0 0 0 2px rgba(94, 230, 255, 0.35); }
+.tip {
+  position: absolute; bottom: calc(100% + 7px); left: 50%;
+  transform: translateX(-50%) scale(0.96); transform-origin: bottom center;
+  background: #0b1120; color: var(--text); border: 1px solid var(--line-strong);
+  border-radius: 7px; padding: 5px 9px; font-family: var(--font); font-style: normal;
+  font-size: 10.5px; letter-spacing: 0.02em; white-space: nowrap;
+  display: none; pointer-events: none; z-index: 30;
+  box-shadow: 0 10px 24px -12px rgba(0, 0, 0, 0.9);
+}
+/* display (not opacity) so a hidden tooltip can never widen the page */
+.info:hover .tip, .info:focus-visible .tip { display: block; transform: translateX(-50%); }
+.info-static {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 12px; height: 12px; margin-left: 2px; border-radius: 50%;
+  border: 1px solid var(--line-strong); font-family: Georgia, serif; font-style: italic;
+  font-size: 8px; color: var(--muted); vertical-align: 1px;
+}

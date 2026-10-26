@@ -32,6 +32,7 @@ const PRICE_TTL_MS = 60_000;
 const KEY_PRICES = 'podgate.prices.v2';
 const KEY_PAYMENTS = 'podgate.payments.v2';
 const KEY_META = 'podgate.meta.v2';
+const KEY_HIST = 'podgate.hist.v1';
 
 // Verified fixture — only used when the live feed is unreachable on a cold cache.
 const FIXTURE = [
@@ -231,6 +232,38 @@ async function fetchPrices(cgIds, force = false) {
   }
 }
 
+/* ------------------------------- historical price -------------------------------
+   CoinGecko market_chart/range gives hourly samples here; we take the one nearest
+   the payment timestamp. Successful lookups are cached forever (past is immutable).
+*/
+
+const histCache = readCache(KEY_HIST) || {};
+
+async function historicalPrice(cgId, iso) {
+  if (!cgId) return null;
+  const ts = new Date(iso).getTime();
+  if (!Number.isFinite(ts)) return null;
+  const key = `${cgId}|${Math.floor(ts / 3_600_000)}`;
+  if (typeof histCache[key] === 'number') return histCache[key];
+
+  try {
+    const from = Math.floor(ts / 1000) - 1800;
+    const to = Math.floor(ts / 1000) + 1800;
+    const j = await getJson(`${COINGECKO}/coins/${cgId}/market_chart/range?vs_currency=usd&from=${from}&to=${to}`);
+    const pts = j.prices || [];
+    if (!pts.length) return null;
+    let best = pts[0];
+    for (const pt of pts) if (Math.abs(pt[0] - ts) < Math.abs(best[0] - ts)) best = pt;
+    const value = best[1];
+    if (typeof value !== 'number' || value <= 0) return null;
+    histCache[key] = value;
+    writeCache(KEY_HIST, histCache);
+    return value;
+  } catch {
+    return null;
+  }
+}
+
 /* ------------------------------- chain status ------------------------------- */
 
 async function fetchChain(rows) {
@@ -280,19 +313,35 @@ async function buildStats({ force = false } = {}) {
     };
   });
 
+  // value at the time of payment (historical sample), newest 12 payments max per load
+  for (let i = 0; i < payments.length && i < 12; i++) {
+    const p = payments[i];
+    if (p.usd == null) continue;
+    const priceThen = await historicalPrice(metas[i].cgId, p.ts);
+    if (priceThen != null) {
+      p.priceThen = priceThen;
+      p.usdThen = round(p.amount * priceThen, 2);
+    }
+  }
+
   const priced = payments.filter((p) => p.usd != null);
   const totalUsd = priced.length ? round(priced.reduce((s, p) => s + p.usd, 0), 2) : null;
+  const withThen = priced.filter((p) => p.usdThen != null);
+  const totalUsdThen = withThen.length && withThen.length === priced.length
+    ? round(withThen.reduce((s, p) => s + p.usdThen, 0), 2)
+    : null;
 
   const byToken = new Map();
   for (const p of payments) {
-    const cur = byToken.get(p.token.symbol) || { symbol: p.token.symbol, amount: 0, usd: 0, priced: true, payments: 0, valuedAs: p.valuedAs || null };
+    const cur = byToken.get(p.token.symbol) || { symbol: p.token.symbol, amount: 0, usd: 0, usdThen: 0, thenKnown: true, priced: true, payments: 0, valuedAs: p.valuedAs || null };
     cur.amount += p.amount;
     cur.payments += 1;
     if (p.usd == null) cur.priced = false; else cur.usd += p.usd;
+    if (p.usdThen == null) cur.thenKnown = false; else cur.usdThen += p.usdThen;
     byToken.set(p.token.symbol, cur);
   }
   const perToken = [...byToken.values()]
-    .map((t) => ({ ...t, amount: round(t.amount, 6), usd: t.priced ? round(t.usd, 2) : null }))
+    .map((t) => ({ ...t, amount: round(t.amount, 6), usd: t.priced ? round(t.usd, 2) : null, usdThen: t.thenKnown && t.usdThen ? round(t.usdThen, 2) : null }))
     .sort((a, b) => (b.usd || 0) - (a.usd || 0));
 
   return {
@@ -300,7 +349,7 @@ async function buildStats({ force = false } = {}) {
     source,
     prices: { map: prices.map, updatedAt: prices.updatedAt, stale: prices.stale, error: prices.error, ttlSeconds: PRICE_TTL_MS / 1000 },
     chain: { head: chain.head, error: chain.error },
-    totals: { usd: totalUsd, payments: payments.length, priced: priced.length, latest: payments.length ? payments[0].ts : null },
+    totals: { usd: totalUsd, usdThen: totalUsdThen, payments: payments.length, priced: priced.length, latest: payments.length ? payments[0].ts : null },
     perToken,
     payments,
     endpoint: { address: ENDPOINT, implementation: IMPLEMENTATION, treasury: TREASURY, explorer: `https://basescan.org/address/${ENDPOINT}` },
@@ -308,6 +357,13 @@ async function buildStats({ force = false } = {}) {
 }
 
 /* ------------------------------- render ------------------------------- */
+
+function usdPair(current, then, opts = {}) {
+  const now = money(current);
+  if (then == null) return `<span class="usd-now">${now}</span>`;
+  const tip = opts.tip || 'value at time of payment';
+  return `<span class="usd-now">${now}</span> <span class="then">(${money(then)}<button class="info" type="button" aria-label="${tip}" title="${tip}"><span class="tip" role="tooltip">${tip}</span>i</button>)</span>`;
+}
 
 function renderBanner() {
   const el = $('#banner');
@@ -342,7 +398,8 @@ function renderTotal(s) {
     $('#totalSub').textContent = 'rate unavailable — retrying';
   } else {
     animateNumber(el, s.totals.usd, (v) => money(v));
-    $('#totalSub').textContent = 'live CoinGecko conversion applied to on-chain intake';
+    $('#totalSub').innerHTML = 'live rate converted on-chain intake'
+      + (s.totals.usdThen != null ? ` <span class="then">(${money(s.totals.usdThen)}<button class="info" type="button" aria-label="value at time of payment" title="value at time of payment"><span class="tip" role="tooltip">value at time of payment</span>i</button>)</span>` : '');
   }
   const n = s.totals.payments;
   const unpriced = n - s.totals.priced;
@@ -365,7 +422,7 @@ function renderRails(s) {
       <span class="rail-tag"><i></i>${t.symbol}</span>
       <span class="rail-bar"><span style="width:${pct}%"></span></span>
       <span>
-        <span class="rail-usd" style="color:${t.usd == null ? 'var(--muted)' : 'var(--text)'}">${t.usd == null ? 'unpriced' : money(t.usd)}</span>
+        <span class="rail-usd" style="color:${t.usd == null ? 'var(--muted)' : 'var(--text)'}">${t.usd == null ? 'unpriced' : usdPair(t.usd, t.usdThen)}</span>
         <span class="rail-amt">${amountText(t.amount)} ${t.symbol}${t.valuedAs ? ` · as ${t.valuedAs}` : ''}</span>
       </span>`;
     ul.appendChild(li);
@@ -433,7 +490,7 @@ function renderLedger(s) {
       </div>
       <div class="cell">
         <span class="cell-k">USD value</span>
-        <span class="usdcell">${money(p.usd)}</span>
+        <span class="usdcell">${p.usd == null ? '—' : usdPair(p.usd, p.usdThen)}</span>
         <span class="method">${p.confirmations == null ? 'block ' + p.block.toLocaleString('en-US') : p.confirmations.toLocaleString('en-US') + ' conf.'}</span>
       </div>
       <div class="cell">
