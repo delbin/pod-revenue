@@ -35,6 +35,17 @@ Blockscout unreachable → last good response from `localStorage` → bundled fi
 saying which one is being shown. CoinGecko unreachable → last cached prices, values stay visible and
 the card reads `DEGRADED`. The page never goes blank.
 
+## Deploying a change
+
+GitHub Pages caches assets for 10 minutes. `index.html` references `styles.css?v=…` and `app.js?v=…`
+— **bump that stamp** whenever you ship a change, so returning visitors can't pair new HTML with a
+stale script:
+
+```bash
+sed -i 's/?v=[0-9a-z]*/?v=$(date +%Y%m%d%H%M)/g' index.html
+git commit -am "bump asset stamp" && git push
+```
+
 ## Editing
 
 - Colours per rail: `RAIL_COLOR` in `app.js`
