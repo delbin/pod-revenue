@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>POD Gate — on-chain revenue for API credits</title>
+<meta name="description" content="Live revenue dashboard for the POD API-credit payment endpoint on Base." />
+<link rel="stylesheet" href="styles.css" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230a0f1c'/%3E%3Cpath d='M8 22 L16 7 L24 22 Z' fill='none' stroke='%235ee6ff' stroke-width='2.2'/%3E%3C/svg%3E" />
+</head>
+<body>
+<div class="bg-grid" aria-hidden="true"></div>
+<div class="bg-glow" aria-hidden="true"></div>
+
+<header class="topbar">
+  <a class="brand" href="/">
+    <span class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 32 32" width="26" height="26"><path d="M6 24 L16 5 L26 24 Z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/><circle cx="16" cy="19" r="2.6" fill="currentColor"/></svg>
+    </span>
+    <span class="brand-text">POD<span class="brand-slash">//</span>GATE<em>Base · 8453</em></span>
+  </a>
+  <div class="tickers" aria-label="Live market rates">
+    <span class="ticker live"><i class="dot"></i>LIVE</span>
+    <span class="ticker">ETH <b id="tickEth">—</b></span>
+    <span class="ticker">POD <b id="tickPod">—</b></span>
+  </div>
+</header>
+
+<div id="banner" class="banner" hidden role="status"></div>
+
+<main>
+  <section class="hero">
+    <p class="hero-kicker">API credits · settled on-chain</p>
+    <h1>ENTER THE <span class="grad">CREDITS GATE</span></h1>
+    <p class="hero-sub">Every token that crosses this contract buys API credit. The gate holds nothing —
+      value passes straight through to a 4-of-7 treasury Safe in the same transaction.</p>
+    <div class="hero-actions">
+      <a class="btn primary" id="contractLink" href="https://basescan.org/address/0x0009b5e129cbc8d731ba23d99e876faf517c257d" target="_blank" rel="noopener noreferrer">View contract ↗</a>
+      <button class="btn" id="refresh" type="button">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 6.1"/><path d="M20 4v7h-7"/></svg>
+        Refresh
+      </button>
+      <span class="hero-note" id="updatedNote">prices from CoinGecko</span>
+    </div>
+  </section>
+
+  <section class="quarters" aria-label="Headline numbers">
+    <article class="card q" id="cardTotal">
+      <header class="card-h"><h2>Total revenue</h2><span class="chip usd">USD</span></header>
+      <div class="stat-big" id="totalUsd" data-skeleton="1">—</div>
+      <p class="card-sub" id="totalSub">live conversion · CoinGecko</p>
+      <div class="card-foot"><span id="totalMeta">—</span></div>
+    </article>
+
+    <article class="card q" id="cardRails">
+      <header class="card-h"><h2>Revenue by rail</h2><span class="chip" id="railCount">—</span></header>
+      <ul class="rails" id="rails"><li class="skel-row" aria-hidden="true"></li><li class="skel-row" aria-hidden="true"></li></ul>
+      <div class="card-foot"><span>two rails have ever fired</span></div>
+    </article>
+
+    <article class="card q">
+      <header class="card-h"><h2>Live rates</h2><span class="chip ghost">CoinGecko</span></header>
+      <ul class="rates" id="rates">
+        <li><span class="rate-k">ETH</span><span class="rate-v" id="rateEth">—</span></li>
+        <li><span class="rate-k">POD</span><span class="rate-v" id="ratePod">—</span></li>
+      </ul>
+      <div class="card-foot"><span id="rateAge">—</span></div>
+    </article>
+
+    <article class="card q">
+      <header class="card-h"><h2>Gate status</h2><span class="chip ok" id="gateChip">—</span></header>
+      <ul class="rates">
+        <li><span class="rate-k">Held</span><span class="rate-v mono" id="heldVal">0</span></li>
+        <li><span class="rate-k">Arrivals</span><span class="rate-v mono" id="arrivalsVal">—</span></li>
+      </ul>
+      <div class="card-foot"><a class="mini-link" id="gateAddr" href="https://basescan.org/address/0x0009b5e129cbc8d731ba23d99e876faf517c257d" target="_blank" rel="noopener noreferrer">0x0009…257D ↗</a></div>
+    </article>
+  </section>
+
+  <section class="card wide flow-card">
+    <header class="card-h">
+      <h2>Incoming flow</h2>
+      <span class="hint">looping replay of every on-chain arrival</span>
+    </header>
+    <div class="canvas-wrap">
+      <canvas id="flow" aria-label="Animated visualisation of payments travelling from payer wallets into the treasury" role="img"></canvas>
+      <div class="hud hud-tl"><span class="hud-k">RAILS LIVE</span><b id="hudRails">—</b></div>
+      <div class="hud hud-br"><span class="hud-k">GATE INTAKE</span><b id="hudIntake">—</b></div>
+    </div>
+    <ul class="flow-legend" id="flowLegend"></ul>
+  </section>
+
+  <section class="card wide">
+    <header class="card-h">
+      <h2>Transaction ledger</h2>
+      <span class="hint" id="ledgerHint">—</span>
+    </header>
+    <div class="ledger" id="ledger">
+      <div class="ledger-skel" aria-hidden="true"></div>
+      <div class="ledger-skel" aria-hidden="true"></div>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <p><b>Static build</b> — no server: amounts are embedded from Base mainnet, prices are fetched live from CoinGecko
+    by your browser, confirmations from a public Base RPC. USD applies today's rate, not the price at payment time.</p>
+  <p><b>Contract</b> — <code>0x0009b5e129cbc8d731ba23d99e876faf517c257d</code> ·
+    implementation <code>0x087ea08d519a4f5100dbc096f77b67c20e4480af</code> ·
+    treasury <code>0x8e35a75ab40270922ad16e003d426612cd23bef6</code></p>
+</footer>
+
+<script src="app.js" defer></script>
+</body>
+</html>
