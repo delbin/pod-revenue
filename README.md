@@ -29,6 +29,28 @@ totals, USD total and the flow animation all recompute from whatever the feed re
 Token metadata is resolved at runtime: unlisted tokens get `symbol()`/`decimals()` from the RPC and a
 CoinGecko id from `/coins/base/contract/<address>`, so a new asset shows up priced without a code change.
 
+### Supported rails
+
+All six assets whitelisted on the endpoint render as their own rail:
+
+| Rail | Token contract | Decimals | Price source |
+|---|---|---|---|
+| POD | `0xed66…f8f` | 18 | CoinGecko `dolphin-2` |
+| ETH | native (`address(0)`) | 18 | CoinGecko `ethereum` |
+| USDC | `0x8335…913` | 6 | CoinGecko `usd-coin` |
+| USDT | `0xfde4…bb2` | 6 | CoinGecko `l2-standard-bridged-usdt-base` |
+| VVV | `0xacfe…1bf` | 18 | CoinGecko `venice-token` |
+| xPOD | `0xec29…988` | 18 | not listed — shown as **unpriced** |
+
+CoinGecko's `/coins/base/contract/<address>` endpoint sends no CORS headers, so ids are pinned in
+`KNOWN_TOKENS` rather than resolved at runtime. Unknown tokens fall back to RPC `symbol()`/`decimals()`
+and are rendered as **unpriced**: visible in the rail list and ledger, excluded from the USD total,
+with the count called out under "Total revenue".
+
+Note: xPOD is an ERC-4626 vault. When someone pays with xPOD the contract redeems the shares and
+emits `APICreditsPurchased` with `paymentToken = POD`, so such a payment lands on the **POD** rail at
+the redeemed amount — it never appears as xPOD.
+
 ### Failure behaviour
 
 Blockscout unreachable → last good response from `localStorage` → bundled fixture, with a banner

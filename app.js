@@ -39,9 +39,15 @@ const FIXTURE = [
   { hash: '0x3615f146cdbfd02aa0414a7d848ebc0796f7b79193d88163815bd8ed03c7367e', block: 52991674, ts: '2026-10-23T16:24:55.000Z', payer: '0x3549d5e347ad00a030a420037ff2ed780c805ab3', tokenAddress: ZERO, rawAmount: '2079457364341085' },
 ];
 
+// Every asset whitelisted on the endpoint. CoinGecko's /coins/base/contract/<address>
+// lookup is *not* CORS-enabled, so ids are pinned here (verified against CoinGecko).
 const KNOWN_TOKENS = {
   [ZERO]: { symbol: 'ETH', name: 'Ether', decimals: 18, cgId: 'ethereum' },
   '0xed664536023d8e4b1640c394777d34abaff1df8f': { symbol: 'POD', name: 'Dolphin', decimals: 18, cgId: 'dolphin-2' },
+  '0xec29311253d37c9682fb7f86fe863202f6f4f988': { symbol: 'xPOD', name: 'xPOD vault', decimals: 18, cgId: null },
+  '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913': { symbol: 'USDC', name: 'USD Coin', decimals: 6, cgId: 'usd-coin' },
+  '0xfde4c96c8593536e31f229ea8f37b2ada2699bb2': { symbol: 'USDT', name: 'Tether USD', decimals: 6, cgId: 'l2-standard-bridged-usdt-base' },
+  '0xacfe6019ed1a7dc6f7b508c02d1b04ec88cc21bf': { symbol: 'VVV', name: 'Venice Token', decimals: 18, cgId: 'venice-token' },
 };
 
 const state = { stats: null, error: null };
@@ -151,11 +157,6 @@ async function tokenMeta(address) {
     const s = decodeAbiString(await rpc('eth_call', [{ to: key, data: '0x95d89b41' }, 'latest']));
     if (s) symbol = s;
   } catch { /* keep short address */ }
-  try {
-    const j = await getJson(`${COINGECKO}/coins/base/contract/${key}`);
-    if (j && j.id) cgId = j.id;
-  } catch { /* unpriced token */ }
-
   const meta = { symbol, name: symbol, decimals, cgId };
   metaCache[key] = meta;
   writeCache(KEY_META, metaCache);
@@ -189,8 +190,10 @@ async function fetchPaymentsLive() {
     };
   });
 
-  rows.sort((a, b) => new Date(b.ts) - new Date(a.ts));
-  return rows;
+  // de-duplicate by tx hash (paginated feeds can overlap at page boundaries)
+  const unique = [...new Map(rows.map((r) => [r.hash.toLowerCase(), r])).values()];
+  unique.sort((a, b) => new Date(b.ts) - new Date(a.ts));
+  return unique;
 }
 
 async function resolvePayments() {
@@ -340,7 +343,9 @@ function renderTotal(s) {
     $('#totalSub').textContent = 'live CoinGecko conversion applied to on-chain intake';
   }
   const n = s.totals.payments;
-  $('#totalMeta').textContent = `${n} arrival${n === 1 ? '' : 's'} · ${s.totals.priced}/${n} priced · latest ${timeAgo(s.totals.latest)}`;
+  const unpriced = n - s.totals.priced;
+  $('#totalMeta').textContent = `${n} arrival${n === 1 ? '' : 's'} · ${s.totals.priced}/${n} priced`
+    + (unpriced ? ` · ${unpriced} unpriced, not in total` : '') + ` · latest ${timeAgo(s.totals.latest)}`;
 }
 
 function renderRails(s) {
@@ -358,7 +363,7 @@ function renderRails(s) {
       <span class="rail-tag"><i></i>${t.symbol}</span>
       <span class="rail-bar"><span style="width:${pct}%"></span></span>
       <span>
-        <span class="rail-usd" style="color:var(--text)">${money(t.usd)}</span>
+        <span class="rail-usd" style="color:${t.usd == null ? 'var(--muted)' : 'var(--text)'}">${t.usd == null ? 'unpriced' : money(t.usd)}</span>
         <span class="rail-amt">${amountText(t.amount)} ${t.symbol}</span>
       </span>`;
     ul.appendChild(li);
@@ -368,9 +373,9 @@ function renderRails(s) {
 
 function renderRates(s) {
   const host = $('#rates');
-  host.innerHTML = s.perToken.slice(0, 4).map((t) => {
+  host.innerHTML = s.perToken.slice(0, 5).map((t) => {
     const p = priceForToken(s, t);
-    return `<li><span class="rate-k">${t.symbol}</span><span class="rate-v">${p == null ? '—' : (p < 1 ? usdFmtSmall.format(p) : money(p))}</span></li>`;
+    return `<li><span class="rate-k">${t.symbol}</span><span class="rate-v">${p == null ? '<span class="muted-small">unpriced</span>' : (p < 1 ? usdFmtSmall.format(p) : money(p))}</span></li>`;
   }).join('') || '<li><span class="rate-k">—</span><span class="rate-v">—</span></li>';
   $('#rateAge').textContent = s.prices.stale
     ? 'last good snapshot · live feed degraded'
@@ -589,18 +594,20 @@ function startFlow(perToken, payments) {
   const ctx = setupCanvas();
   const { w, h } = flow.size;
 
-  const rails = (perToken || []).slice(0, 4).map((t) => ({
+  const rails = (perToken || []).slice(0, 6).map((t) => ({
     symbol: t.symbol,
     color: RAIL_COLOR[t.symbol] || '#5ee6ff',
     label: `${amountText(t.amount)} ${t.symbol}`,
   }));
   const railIndex = new Map(rails.map((r, i) => [r.symbol, i]));
 
-  const items = (payments || []).slice(0, 8).map((p) => ({
-    rail: railIndex.has(p.token.symbol) ? railIndex.get(p.token.symbol) : 0,
-    usd: p.usd,
-    color: RAIL_COLOR[p.token.symbol] || '#5ee6ff',
-  }));
+  const items = (payments || []).slice(0, 8)
+    .filter((p) => railIndex.has(p.token.symbol))
+    .map((p) => ({
+      rail: railIndex.get(p.token.symbol),
+      usd: p.usd,
+      color: RAIL_COLOR[p.token.symbol] || '#5ee6ff',
+    }));
 
   const scene = { rails, animate: !reduceMotion.matches };
 
