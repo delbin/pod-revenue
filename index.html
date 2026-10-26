@@ -19,11 +19,7 @@
     </span>
     <span class="brand-text">POD<span class="brand-slash">//</span>GATE<em>Base · 8453</em></span>
   </a>
-  <div class="tickers" aria-label="Live market rates">
-    <span class="ticker live"><i class="dot"></i>LIVE</span>
-    <span class="ticker">ETH <b id="tickEth">—</b></span>
-    <span class="ticker">POD <b id="tickPod">—</b></span>
-  </div>
+  <div class="tickers" id="tickers" aria-label="Live market rates"></div>
 </header>
 
 <div id="banner" class="banner" hidden role="status"></div>
@@ -55,15 +51,12 @@
     <article class="card q" id="cardRails">
       <header class="card-h"><h2>Revenue by rail</h2><span class="chip" id="railCount">—</span></header>
       <ul class="rails" id="rails"><li class="skel-row" aria-hidden="true"></li><li class="skel-row" aria-hidden="true"></li></ul>
-      <div class="card-foot"><span>two rails have ever fired</span></div>
+      <div class="card-foot"><span id="railFoot">rails with recorded payments</span></div>
     </article>
 
     <article class="card q">
       <header class="card-h"><h2>Live rates</h2><span class="chip ghost">CoinGecko</span></header>
-      <ul class="rates" id="rates">
-        <li><span class="rate-k">ETH</span><span class="rate-v" id="rateEth">—</span></li>
-        <li><span class="rate-k">POD</span><span class="rate-v" id="ratePod">—</span></li>
-      </ul>
+      <ul class="rates" id="rates"><li><span class="rate-k">—</span><span class="rate-v">—</span></li></ul>
       <div class="card-foot"><span id="rateAge">—</span></div>
     </article>
 
@@ -80,7 +73,7 @@
   <section class="card wide flow-card">
     <header class="card-h">
       <h2>Incoming flow</h2>
-      <span class="hint">looping replay of every on-chain arrival</span>
+      <span class="hint">looping replay · refreshed every 60s</span>
     </header>
     <div class="canvas-wrap">
       <canvas id="flow" aria-label="Animated visualisation of payments travelling from payer wallets into the treasury" role="img"></canvas>
@@ -103,8 +96,9 @@
 </main>
 
 <footer class="foot">
-  <p><b>Static build</b> — no server: amounts are embedded from Base mainnet, prices are fetched live from CoinGecko
-    by your browser, confirmations from a public Base RPC. USD applies today's rate, not the price at payment time.</p>
+  <p><b>Live, no server</b> — payments are read from Blockscout's indexed <code>APICreditsPurchased</code> logs,
+    prices from CoinGecko, confirmations from a public Base RPC. The page re-checks every 60s, so new arrivals appear on
+    their own. USD applies today's rate, not the price at payment time.</p>
   <p><b>Contract</b> — <code>0x0009b5e129cbc8d731ba23d99e876faf517c257d</code> ·
     implementation <code>0x087ea08d519a4f5100dbc096f77b67c20e4480af</code> ·
     treasury <code>0x8e35a75ab40270922ad16e003d426612cd23bef6</code></p>

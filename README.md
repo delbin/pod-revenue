@@ -1,6 +1,6 @@
 # POD Gate — revenue dashboard
 
-Static, dependency-free dashboard for the **POD API-credit payment endpoint** on Base mainnet.
+Live, dependency-free dashboard for the **POD API-credit payment endpoint** on Base mainnet.
 
 - **Endpoint:** `0x0009b5e129cbc8d731ba23d99e876faf517c257d` (UUPS proxy → `APICreditPayment`)
 - **Treasury:** `0x8e35a75ab40270922ad16e003d426612cd23bef6` (4-of-7 Safe)
@@ -13,33 +13,34 @@ Static, dependency-free dashboard for the **POD API-credit payment endpoint** on
 3. An animated "incoming flow" visualisation of arrivals into the treasury
 4. A transaction ledger — amount, token, rate, USD value, confirmations, payer, and a Basescan link per transaction
 
-## How it works
+## How it works — it updates itself
 
 No build step, no backend, no dependencies. Three files: `index.html`, `styles.css`, `app.js`.
 
-- Payments are an embedded fixture (`PAYMENTS` in `app.js`) — every payment the endpoint has ever taken, verified on-chain.
-- Prices are fetched from CoinGecko **in the browser** (60s cache in `localStorage`, stale-cache fallback).
-- Confirmation counts come from a public Base RPC (`eth_blockNumber`, `eth_getTransactionReceipt`), and degrade gracefully when unavailable.
+| Data | Source | Refresh |
+|---|---|---|
+| Payments | Blockscout indexed `APICreditsPurchased` logs (`/api/v2/addresses/<endpoint>/logs`) | every 60s |
+| USD prices | CoinGecko (`simple/price`, ids resolved per token) | every 60s, `localStorage` cache |
+| Confirmations | Base public RPC (`eth_blockNumber`, `eth_getTransactionReceipt`) | every 60s |
+
+**A new payment appears on its own within a minute — no rebuild, no commit.** The ledger, per-rail
+totals, USD total and the flow animation all recompute from whatever the feed returns.
+
+Token metadata is resolved at runtime: unlisted tokens get `symbol()`/`decimals()` from the RPC and a
+CoinGecko id from `/coins/base/contract/<address>`, so a new asset shows up priced without a code change.
+
+### Failure behaviour
+
+Blockscout unreachable → last good response from `localStorage` → bundled fixture, with a banner
+saying which one is being shown. CoinGecko unreachable → last cached prices, values stay visible and
+the card reads `DEGRADED`. The page never goes blank.
+
+## Editing
+
+- Colours per rail: `RAIL_COLOR` in `app.js`
+- Known symbol/decimals/CoinGecko ids: `KNOWN_TOKENS` (others are auto-resolved)
+- Poll interval: the `setInterval(... 60_000)` at the bottom of `app.js`
 - `prefers-reduced-motion` renders a static scene instead of the animation.
-
-## Adding a new payment
-
-Append an entry to `PAYMENTS` in `app.js`:
-
-```js
-{
-  hash: '0x…',            // transaction hash
-  block: 12345678,        // block number
-  ts: '2026-10-24T13:42:49.000Z',
-  method: 'buyCredits',   // or buyCreditsWithETH
-  payer: '0x…',
-  rawAmount: '10366991499066970765',  // integer string, token units
-  decimals: 18,
-  token: { symbol: 'POD', name: 'Dolphin', cgId: 'dolphin-2', address: '0x…' },
-}
-```
-
-For a new asset, add its CoinGecko id as `cgId` and a colour in `RAIL_COLOR`.
 
 ## Notes
 

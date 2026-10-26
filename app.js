@@ -1,6 +1,12 @@
 'use strict';
 
-/* ============================== POD GATE front-end ============================== */
+/* ============================== POD GATE front-end ==============================
+   Live data, no backend:
+     • payments  ← Blockscout indexed APICreditsPurchased logs (CORS-enabled)
+     • prices    ← CoinGecko (live, 60s cache)
+     • status    ← Base RPC receipts + block head
+   Degrades to the last cached snapshot, then to a bundled fixture.
+*/
 
 const $ = (sel) => document.querySelector(sel);
 const usdFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -9,11 +15,41 @@ const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
 const RAIL_COLOR = { POD: '#4d9dff', ETH: '#a78bfa', USDC: '#3d82f6', USDT: '#2aa985', VVV: '#ffc26b', xPOD: '#7c9cff' };
 
-const state = { stats: null, loadedAt: null, error: null };
+/* ------------------------------- config ------------------------------- */
+
+const ENDPOINT = '0x0009b5e129cbc8d731ba23d99e876faf517c257d';
+const TREASURY = '0x8e35a75ab40270922ad16e003d426612cd23bef6';
+const IMPLEMENTATION = '0x087ea08d519a4f5100dbc096f77b67c20e4480af';
+const WHITELISTED_RAILS = 6;
+
+const BLOCKSCOUT = 'https://base.blockscout.com/api/v2';
+const RPC_URL = 'https://mainnet.base.org';
+const COINGECKO = 'https://api.coingecko.com/api/v3';
+const TOPIC_BUY = '0x93ece0a7f4cba426dcb3c786e68fb5fd9ce335d154c103376e160ab0dd00379f';
+const ZERO = '0x0000000000000000000000000000000000000000';
+
+const PRICE_TTL_MS = 60_000;
+const KEY_PRICES = 'podgate.prices.v2';
+const KEY_PAYMENTS = 'podgate.payments.v2';
+const KEY_META = 'podgate.meta.v2';
+
+// Verified fixture — only used when the live feed is unreachable on a cold cache.
+const FIXTURE = [
+  { hash: '0x1c0dff041806b072d9a2f86bfae6c1849c4298bbb1757cd3030b862d1ef09453', block: 53030011, ts: '2026-10-24T13:42:49.000Z', payer: '0x154f5e21835ad6d2bf2808577aeae5cba57c4710', tokenAddress: '0xed664536023d8e4b1640c394777d34abaff1df8f', rawAmount: '10366991499066970765' },
+  { hash: '0x3615f146cdbfd02aa0414a7d848ebc0796f7b79193d88163815bd8ed03c7367e', block: 52991674, ts: '2026-10-23T16:24:55.000Z', payer: '0x3549d5e347ad00a030a420037ff2ed780c805ab3', tokenAddress: ZERO, rawAmount: '2079457364341085' },
+];
+
+const KNOWN_TOKENS = {
+  [ZERO]: { symbol: 'ETH', name: 'Ether', decimals: 18, cgId: 'ethereum' },
+  '0xed664536023d8e4b1640c394777d34abaff1df8f': { symbol: 'POD', name: 'Dolphin', decimals: 18, cgId: 'dolphin-2' },
+};
+
+const state = { stats: null, error: null };
 
 /* ------------------------------- helpers ------------------------------- */
 
 const money = (v, small = false) => (v == null ? '—' : (small ? usdFmtSmall : usdFmt).format(v));
+const round = (n, dp) => Math.round(n * 10 ** dp) / 10 ** dp;
 
 function shortAddr(a, front = 6, back = 4) {
   if (!a) return '—';
@@ -26,7 +62,8 @@ function timeAgo(iso) {
   if (s < 60) return `${s}s ago`;
   const m = Math.round(s / 60);
   if (m < 60) return `${m}m ago`;
-  return `${Math.round(m / 60)}h ago`;
+  const h = Math.round(m / 60);
+  return h < 48 ? `${h}h ago` : `${Math.round(h / 24)}d ago`;
 }
 
 function fmtDate(iso) {
@@ -37,19 +74,233 @@ function fmtDate(iso) {
   };
 }
 
+const amountText = (v) => v.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 6 });
+
 function animateNumber(el, to, formatter, duration = 850) {
   if (to == null) { el.textContent = '—'; return; }
   if (reduceMotion.matches) { el.textContent = formatter(to); return; }
-  const from = 0;
   const start = performance.now();
   const step = (now) => {
     const t = Math.min(1, (now - start) / duration);
     const eased = 1 - Math.pow(1 - t, 3);
-    el.textContent = formatter(from + (to - from) * eased);
+    el.textContent = formatter(to * eased);
     if (t < 1) requestAnimationFrame(step);
     else el.textContent = formatter(to);
   };
   requestAnimationFrame(step);
+}
+
+function readCache(key) {
+  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; } catch { return null; }
+}
+function writeCache(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode */ }
+}
+
+async function getJson(url, timeoutMs = 9000) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: ctl.signal, headers: { accept: 'application/json' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } finally { clearTimeout(t); }
+}
+
+async function rpc(method, params) {
+  const res = await fetch(RPC_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    signal: AbortSignal.timeout(9000),
+  });
+  if (!res.ok) throw new Error(`rpc ${res.status}`);
+  const body = await res.json();
+  if (body.error) throw new Error(body.error.message || 'rpc error');
+  return body.result;
+}
+
+function decodeAbiString(hex) {
+  try {
+    const raw = String(hex).slice(2);
+    if (raw.length < 128) return null;
+    const len = parseInt(raw.slice(64, 128), 16);
+    if (!len || len > 96) return null;
+    const bytes = raw.slice(128, 128 + len * 2);
+    return decodeURIComponent(bytes.replace(/../g, '%$&')).replace(/\u0000/g, '');
+  } catch { return null; }
+}
+
+/* ------------------------------- token metadata ------------------------------- */
+
+const metaCache = readCache(KEY_META) || {};
+
+async function tokenMeta(address) {
+  const key = String(address).toLowerCase();
+  if (KNOWN_TOKENS[key]) return KNOWN_TOKENS[key];
+  if (metaCache[key]) return metaCache[key];
+
+  let decimals = 18;
+  let symbol = shortAddr(key, 4, 4);
+  let cgId = null;
+  try {
+    decimals = Number(BigInt(await rpc('eth_call', [{ to: key, data: '0x313ce567' }, 'latest'])));
+    if (!Number.isFinite(decimals) || decimals > 36) decimals = 18;
+  } catch { /* default 18 */ }
+  try {
+    const s = decodeAbiString(await rpc('eth_call', [{ to: key, data: '0x95d89b41' }, 'latest']));
+    if (s) symbol = s;
+  } catch { /* keep short address */ }
+  try {
+    const j = await getJson(`${COINGECKO}/coins/base/contract/${key}`);
+    if (j && j.id) cgId = j.id;
+  } catch { /* unpriced token */ }
+
+  const meta = { symbol, name: symbol, decimals, cgId };
+  metaCache[key] = meta;
+  writeCache(KEY_META, metaCache);
+  return meta;
+}
+
+/* ------------------------------- payments (Blockscout) ------------------------------- */
+
+async function fetchPaymentsLive() {
+  const items = [];
+  let url = `${BLOCKSCOUT}/addresses/${ENDPOINT}/logs`;
+  for (let page = 0; page < 6 && url; page++) {
+    const json = await getJson(url);
+    items.push(...(json.items || []));
+    if (!json.next_page_params) break;
+    url = `${BLOCKSCOUT}/addresses/${ENDPOINT}/logs?${new URLSearchParams(json.next_page_params).toString()}`;
+  }
+
+  const events = items.filter((l) => (l.topics || [])[0] === TOPIC_BUY && l.decoded && l.decoded.parameters);
+  if (!events.length) throw new Error('no payment events returned');
+
+  const rows = events.map((l) => {
+    const p = Object.fromEntries(l.decoded.parameters.map((x) => [x.name, x.value]));
+    return {
+      hash: l.transaction_hash,
+      block: l.block_number,
+      ts: l.block_timestamp,
+      payer: p.payer,
+      tokenAddress: String(p.paymentToken).toLowerCase(),
+      rawAmount: String(p.amount),
+    };
+  });
+
+  rows.sort((a, b) => new Date(b.ts) - new Date(a.ts));
+  return rows;
+}
+
+async function resolvePayments() {
+  try {
+    const rows = await fetchPaymentsLive();
+    writeCache(KEY_PAYMENTS, { at: new Date().toISOString(), rows });
+    return { rows, source: 'live' };
+  } catch (err) {
+    const cached = readCache(KEY_PAYMENTS);
+    if (cached && cached.rows && cached.rows.length) return { rows: cached.rows, source: `cached snapshot (${err.message})` };
+    return { rows: FIXTURE, source: `bundled snapshot (${err.message})` };
+  }
+}
+
+/* ------------------------------- prices ------------------------------- */
+
+async function fetchPrices(cgIds, force = false) {
+  const ids = [...new Set(['ethereum', 'dolphin-2', ...cgIds.filter(Boolean)])].sort();
+  const signature = ids.join(',');
+  const cached = readCache(KEY_PRICES);
+  const fresh = cached && cached.ids === signature && Date.now() - new Date(cached.updatedAt).getTime() < PRICE_TTL_MS;
+  if (!force && fresh) return { map: cached.map, updatedAt: cached.updatedAt, stale: false, error: null };
+
+  try {
+    const j = await getJson(`${COINGECKO}/simple/price?ids=${signature}&vs_currencies=usd`);
+    const map = {};
+    for (const id of ids) if (j[id] && typeof j[id].usd === 'number') map[id] = j[id].usd;
+    if (!Object.keys(map).length) throw new Error('no usable prices');
+    const payload = { ids: signature, map, updatedAt: new Date().toISOString() };
+    writeCache(KEY_PRICES, payload);
+    return { map, updatedAt: payload.updatedAt, stale: false, error: null };
+  } catch (err) {
+    if (cached && cached.map) return { map: cached.map, updatedAt: cached.updatedAt, stale: true, error: err.message };
+    return { map: {}, updatedAt: null, stale: true, error: err.message };
+  }
+}
+
+/* ------------------------------- chain status ------------------------------- */
+
+async function fetchChain(rows) {
+  try {
+    const head = parseInt(await rpc('eth_blockNumber', []), 16);
+    const receipts = {};
+    await Promise.all(rows.slice(0, 20).map(async (r) => {
+      try {
+        const rc = await rpc('eth_getTransactionReceipt', [r.hash]);
+        receipts[r.hash] = rc ? parseInt(rc.status, 16) : null;
+      } catch { receipts[r.hash] = null; }
+    }));
+    return { head, receipts, error: null };
+  } catch (err) {
+    return { head: null, receipts: {}, error: err.message };
+  }
+}
+
+/* ------------------------------- model ------------------------------- */
+
+async function buildStats({ force = false } = {}) {
+  const { rows, source } = await resolvePayments();
+  const metas = await Promise.all(rows.map((r) => tokenMeta(r.tokenAddress)));
+  const prices = await fetchPrices(metas.map((m) => m.cgId), force);
+  const chain = await fetchChain(rows);
+
+  const payments = rows.map((r, i) => {
+    const meta = metas[i];
+    const amount = Number(r.rawAmount) / 10 ** meta.decimals;
+    const price = meta.cgId && typeof prices.map[meta.cgId] === 'number' ? prices.map[meta.cgId] : null;
+    const usd = price == null ? null : round(amount * price, 2);
+    return {
+      hash: r.hash,
+      ts: r.ts,
+      block: r.block,
+      payer: r.payer,
+      method: r.tokenAddress === ZERO ? 'buyCreditsWithETH' : 'buyCredits',
+      token: { symbol: meta.symbol, address: r.tokenAddress },
+      amount,
+      amountLabel: amountText(amount),
+      price,
+      usd,
+      confirmations: chain.head ? Math.max(0, chain.head - r.block) : null,
+      status: chain.receipts[r.hash] === 0 ? 'failed' : 'confirmed',
+      explorer: `https://basescan.org/tx/${r.hash}`,
+    };
+  });
+
+  const priced = payments.filter((p) => p.usd != null);
+  const totalUsd = priced.length ? round(priced.reduce((s, p) => s + p.usd, 0), 2) : null;
+
+  const byToken = new Map();
+  for (const p of payments) {
+    const cur = byToken.get(p.token.symbol) || { symbol: p.token.symbol, amount: 0, usd: 0, priced: true, payments: 0 };
+    cur.amount += p.amount;
+    cur.payments += 1;
+    if (p.usd == null) cur.priced = false; else cur.usd += p.usd;
+    byToken.set(p.token.symbol, cur);
+  }
+  const perToken = [...byToken.values()]
+    .map((t) => ({ ...t, amount: round(t.amount, 6), usd: t.priced ? round(t.usd, 2) : null }))
+    .sort((a, b) => (b.usd || 0) - (a.usd || 0));
+
+  return {
+    generatedAt: new Date().toISOString(),
+    source,
+    prices: { map: prices.map, updatedAt: prices.updatedAt, stale: prices.stale, error: prices.error, ttlSeconds: PRICE_TTL_MS / 1000 },
+    chain: { head: chain.head, error: chain.error },
+    totals: { usd: totalUsd, payments: payments.length, priced: priced.length, latest: payments.length ? payments[0].ts : null },
+    perToken,
+    payments,
+    endpoint: { address: ENDPOINT, implementation: IMPLEMENTATION, treasury: TREASURY, explorer: `https://basescan.org/address/${ENDPOINT}` },
+  };
 }
 
 /* ------------------------------- render ------------------------------- */
@@ -62,41 +313,41 @@ function renderBanner() {
   el.textContent = state.error;
 }
 
-function renderPrices(s) {
-  const eth = s.prices.eth;
-  const pod = s.prices.pod;
-  $('#tickEth').textContent = eth == null ? '—' : money(eth);
-  $('#tickPod').textContent = pod == null ? '—' : usdFmtSmall.format(pod);
-  $('#rateEth').textContent = eth == null ? '—' : money(eth);
-  $('#ratePod').textContent = pod == null ? '—' : usdFmtSmall.format(pod);
-  $('#rateAge').textContent = s.prices.stale
-    ? 'last good snapshot · live feed degraded'
-    : `refreshed ${timeAgo(s.prices.updatedAt)} · every ${s.prices.ttlSeconds}s`;
+function priceForToken(s, t) {
+  if (t.symbol === 'ETH') return s.prices.map.ethereum ?? null;
+  if (t.symbol === 'POD') return s.prices.map['dolphin-2'] ?? null;
+  return t.priced && t.amount ? t.usd / t.amount : null;
+}
+
+function renderTickers(s) {
+  const host = $('#tickers');
+  const eth = s.prices.map.ethereum;
+  const secondary = s.perToken.find((t) => t.symbol !== 'ETH');
+  const secondPrice = secondary ? priceForToken(s, secondary) : null;
+  host.innerHTML = `
+    <span class="ticker live"><i class="dot"></i>LIVE</span>
+    <span class="ticker">ETH <b>${eth == null ? '—' : money(eth)}</b></span>
+    ${secondary ? `<span class="ticker">${secondary.symbol} <b>${secondPrice == null ? '—' : usdFmtSmall.format(secondPrice)}</b></span>` : ''}`;
 }
 
 function renderTotal(s) {
   const el = $('#totalUsd');
-  const total = s.totals.usd;
-  if (total == null) {
+  if (s.totals.usd == null) {
     el.textContent = '—';
     $('#totalSub').textContent = 'rate unavailable — retrying';
   } else {
-    animateNumber(el, total, (v) => money(v));
+    animateNumber(el, s.totals.usd, (v) => money(v));
     $('#totalSub').textContent = 'live CoinGecko conversion applied to on-chain intake';
   }
   const n = s.totals.payments;
-  $('#totalMeta').textContent = `${n} arrival${n === 1 ? '' : 's'} · ${s.totals.pricedPayments}/${n} priced`;
+  $('#totalMeta').textContent = `${n} arrival${n === 1 ? '' : 's'} · ${s.totals.priced}/${n} priced · latest ${timeAgo(s.totals.latest)}`;
 }
 
 function renderRails(s) {
   const ul = $('#rails');
   const total = s.totals.usd || 0;
-  $('#railCount').textContent = `${s.perToken.length} rails`;
-  ul.innerHTML = '';
-  if (!s.perToken.length) {
-    ul.innerHTML = '<li class="empty">No payments yet</li>';
-    return;
-  }
+  $('#railCount').textContent = `${s.perToken.length} rail${s.perToken.length === 1 ? '' : 's'}`;
+  ul.innerHTML = s.perToken.length ? '' : '<li class="empty">No payments yet</li>';
   for (const t of s.perToken) {
     const color = RAIL_COLOR[t.symbol] || 'var(--cyan)';
     const pct = t.usd != null && total ? Math.max(2, Math.round((t.usd / total) * 100)) : 0;
@@ -108,26 +359,35 @@ function renderRails(s) {
       <span class="rail-bar"><span style="width:${pct}%"></span></span>
       <span>
         <span class="rail-usd" style="color:var(--text)">${money(t.usd)}</span>
-        <span class="rail-amt">${t.amount.toLocaleString('en-US', { maximumFractionDigits: 6 })} ${t.symbol}</span>
+        <span class="rail-amt">${amountText(t.amount)} ${t.symbol}</span>
       </span>`;
     ul.appendChild(li);
   }
-  $('#hudRails').textContent = `${s.perToken.length}/6`;
+  $('#hudRails').textContent = `${s.perToken.length}/${Math.max(WHITELISTED_RAILS, s.perToken.length)}`;
+}
+
+function renderRates(s) {
+  const host = $('#rates');
+  host.innerHTML = s.perToken.slice(0, 4).map((t) => {
+    const p = priceForToken(s, t);
+    return `<li><span class="rate-k">${t.symbol}</span><span class="rate-v">${p == null ? '—' : (p < 1 ? usdFmtSmall.format(p) : money(p))}</span></li>`;
+  }).join('') || '<li><span class="rate-k">—</span><span class="rate-v">—</span></li>';
+  $('#rateAge').textContent = s.prices.stale
+    ? 'last good snapshot · live feed degraded'
+    : `refreshed ${timeAgo(s.prices.updatedAt)} · every ${s.prices.ttlSeconds}s`;
 }
 
 function renderGate(s) {
   $('#arrivalsVal').textContent = String(s.totals.payments);
   $('#heldVal').textContent = '0';
   const chip = $('#gateChip');
-  const degraded = s.prices.stale || !s.chain.head;
+  const degraded = s.prices.stale || !s.chain.head || s.source !== 'live';
   chip.textContent = degraded ? 'DEGRADED' : 'ONLINE';
   chip.className = `chip ${degraded ? 'warn' : 'ok'}`;
-  if (s.endpoint) {
-    const a = $('#gateAddr');
-    a.href = s.endpoint.explorer;
-    a.textContent = `${shortAddr(s.endpoint.address, 6, 4)} ↗`;
-    $('#contractLink').href = s.endpoint.explorer;
-  }
+  const a = $('#gateAddr');
+  a.href = s.endpoint.explorer;
+  a.textContent = `${shortAddr(s.endpoint.address, 6, 4)} ↗`;
+  $('#contractLink').href = s.endpoint.explorer;
 }
 
 function renderLedger(s) {
@@ -138,11 +398,10 @@ function renderLedger(s) {
     host.innerHTML = '<div class="empty">No payments have reached this endpoint yet.</div>';
     return;
   }
+  host.innerHTML = '';
   const head = document.createElement('div');
   head.className = 'row head';
   head.innerHTML = `<span>When</span><span>Rail</span><span>Amount</span><span>USD value</span><span>Payer</span><span>Transaction</span>`;
-
-  host.innerHTML = '';
   host.appendChild(head);
 
   for (const p of rows) {
@@ -185,12 +444,12 @@ function renderLedger(s) {
 function renderLegend(s) {
   const ul = $('#flowLegend');
   ul.innerHTML = '';
-  for (const p of s.payments || []) {
+  for (const p of (s.payments || []).slice(0, 6)) {
     const color = RAIL_COLOR[p.token.symbol] || 'var(--cyan)';
     const li = document.createElement('li');
     li.innerHTML = `<i style="background:${color};box-shadow:0 0 8px ${color}"></i>
       ${p.amountLabel} ${p.token.symbol} → <b style="color:var(--text)">${money(p.usd)}</b>
-      <span style="color:var(--dim)">· ${shortAddr(p.payer, 5, 3)}</span>`;
+      <span style="color:var(--dim)">· ${shortAddr(p.payer, 5, 3)} · ${timeAgo(p.ts)}</span>`;
     ul.appendChild(li);
   }
   $('#hudIntake').textContent = money(s.totals.usd);
@@ -198,30 +457,31 @@ function renderLegend(s) {
 
 function render(s) {
   state.stats = s;
-  state.loadedAt = Date.now();
-  renderPrices(s);
+  renderTickers(s);
   renderTotal(s);
   renderRails(s);
+  renderRates(s);
   renderGate(s);
   renderLedger(s);
   renderLegend(s);
-  $('#updatedNote').textContent = `prices from CoinGecko · updated ${timeAgo(s.prices.updatedAt)}`;
-  startFlow(s.payments || []);
+  $('#updatedNote').textContent = `live · Blockscout + CoinGecko · updated ${timeAgo(s.prices.updatedAt || s.generatedAt)}`;
+  startFlow(s.perToken, s.payments);
 }
 
 /* ------------------------------- flow canvas ------------------------------- */
 
-const flow = { raf: 0, particles: [], pulses: [], t0: 0, payments: [], size: { w: 0, h: 0 }, nextSpawn: 0, idx: 0 };
+const flow = { raf: 0, particles: [], pulses: [], t0: 0, nextSpawn: 0, idx: 0 };
 
-function nodePositions(w, h) {
+function nodePositions(w, h, count) {
   const narrow = w < 520;
-  return {
-    core: { x: w * (narrow ? 0.72 : 0.79), y: h * (narrow ? 0.44 : 0.5) },
-    sources: [
-      { x: w * (narrow ? 0.2 : 0.13), y: h * (narrow ? 0.26 : 0.29) },
-      { x: w * (narrow ? 0.2 : 0.13), y: h * (narrow ? 0.66 : 0.71) },
-    ],
-  };
+  const top = narrow ? 0.2 : 0.24;
+  const bottom = narrow ? 0.74 : 0.78;
+  const sources = [];
+  for (let i = 0; i < count; i++) {
+    const t = count === 1 ? 0.5 : i / (count - 1);
+    sources.push({ x: w * (narrow ? 0.2 : 0.13), y: h * (top + (bottom - top) * t) });
+  }
+  return { core: { x: w * (narrow ? 0.72 : 0.79), y: h * (narrow ? 0.44 : 0.5) }, sources };
 }
 
 function setupCanvas() {
@@ -236,40 +496,46 @@ function setupCanvas() {
   return ctx;
 }
 
-function drawScene(ctx, w, h, opts = {}) {
-  const { core, sources } = nodePositions(w, h);
+function hexA(hex, a) {
+  const h = hex.replace('#', '');
+  const n = parseInt(h.length === 3 ? h.split('').map((c) => c + c).join('') : h, 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
+
+function curve(s, core, t) {
+  const cp = { x: (s.x + core.x) / 2, y: s.y + (core.y - s.y) * 0.15 };
+  return {
+    x: (1 - t) * (1 - t) * (s.x + 26) + 2 * (1 - t) * t * cp.x + t * t * (core.x - 30),
+    y: (1 - t) * (1 - t) * s.y + 2 * (1 - t) * t * cp.y + t * t * core.y,
+  };
+}
+
+function drawScene(ctx, w, h, o) {
+  const { core, sources } = nodePositions(w, h, o.rails.length);
   ctx.clearRect(0, 0, w, h);
 
-  // faint scan grid
   ctx.strokeStyle = 'rgba(122,176,255,0.06)';
   ctx.lineWidth = 1;
   for (let x = 0; x < w; x += 48) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); }
   for (let y = 0; y < h; y += 48) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
 
-  const used = Math.min(sources.length, Math.max(1, (opts.count || 1)));
-
-  // rails
-  for (let i = 0; i < used; i++) {
+  o.rails.forEach((rail, i) => {
     const s = sources[i];
-    const color = opts.colors?.[i] || '#5ee6ff';
-    const midX = (s.x + core.x) / 2;
-    const cp = { x: midX, y: s.y + (core.y - s.y) * 0.15 };
+    if (!s) return;
     ctx.beginPath();
     ctx.moveTo(s.x + 26, s.y);
-    ctx.quadraticCurveTo(cp.x, cp.y, core.x - 30, core.y);
+    ctx.quadraticCurveTo((s.x + core.x) / 2, s.y + (core.y - s.y) * 0.15, core.x - 30, core.y);
     ctx.setLineDash([4, 7]);
     ctx.lineWidth = 1.4;
-    ctx.strokeStyle = hexA(color, 0.32);
+    ctx.strokeStyle = hexA(rail.color, 0.32);
     ctx.stroke();
     ctx.setLineDash([]);
-  }
+  });
 
-  // core
-  const t = opts.time || 0;
+  const t = o.time || 0;
   for (let r = 0; r < 3; r++) {
-    const rad = 34 + r * 15 + (opts.animate ? Math.sin(t / 700 + r) * 3 : 0);
     ctx.beginPath();
-    ctx.arc(core.x, core.y, rad, 0, Math.PI * 2);
+    ctx.arc(core.x, core.y, 34 + r * 15 + (o.animate ? Math.sin(t / 700 + r) * 3 : 0), 0, Math.PI * 2);
     ctx.strokeStyle = hexA('#5ee6ff', 0.30 - r * 0.08);
     ctx.lineWidth = 1.2;
     ctx.stroke();
@@ -279,176 +545,135 @@ function drawScene(ctx, w, h, opts = {}) {
   g.addColorStop(0.45, 'rgba(167,139,250,0.22)');
   g.addColorStop(1, 'rgba(94,230,255,0)');
   ctx.fillStyle = g;
-  ctx.beginPath();
-  ctx.arc(core.x, core.y, 62, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(core.x, core.y, 20, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(8,14,26,0.95)';
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(94,230,255,0.85)';
-  ctx.lineWidth = 1.6;
-  ctx.stroke();
+  ctx.beginPath(); ctx.arc(core.x, core.y, 62, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(core.x, core.y, 20, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(8,14,26,0.95)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(94,230,255,0.85)'; ctx.lineWidth = 1.6; ctx.stroke();
 
+  ctx.textAlign = 'center';
   ctx.font = '600 10px ui-monospace, Menlo, monospace';
   ctx.fillStyle = 'rgba(233,240,255,0.92)';
-  ctx.textAlign = 'center';
   ctx.fillText('TREASURY', core.x, core.y + 46);
   ctx.fillStyle = 'rgba(107,127,156,0.9)';
   ctx.font = '9px ui-monospace, Menlo, monospace';
   ctx.fillText('0x8e35…BEF6', core.x, core.y + 59);
 
-  // sources
-  for (let i = 0; i < used; i++) {
+  o.rails.forEach((rail, i) => {
     const s = sources[i];
-    const color = opts.colors?.[i] || '#5ee6ff';
+    if (!s) return;
     ctx.beginPath();
-    const R = 13;
     for (let k = 0; k < 6; k++) {
       const ang = (Math.PI / 3) * k - Math.PI / 6;
-      const x = s.x + Math.cos(ang) * R;
-      const y = s.y + Math.sin(ang) * R;
+      const x = s.x + Math.cos(ang) * 13;
+      const y = s.y + Math.sin(ang) * 13;
       k ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
     }
     ctx.closePath();
-    ctx.fillStyle = 'rgba(8,14,26,0.95)';
-    ctx.fill();
-    ctx.strokeStyle = hexA(color, 0.95);
-    ctx.lineWidth = 1.6;
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(s.x, s.y, 3.2, 0, Math.PI * 2);
-    ctx.fillStyle = color;
-    ctx.fill();
+    ctx.fillStyle = 'rgba(8,14,26,0.95)'; ctx.fill();
+    ctx.strokeStyle = hexA(rail.color, 0.95); ctx.lineWidth = 1.6; ctx.stroke();
+    ctx.beginPath(); ctx.arc(s.x, s.y, 3.2, 0, Math.PI * 2);
+    ctx.fillStyle = rail.color; ctx.fill();
 
     ctx.textAlign = 'left';
     ctx.font = '600 10px ui-monospace, Menlo, monospace';
-    ctx.fillStyle = hexA(color, 0.95);
-    ctx.fillText(opts.labels?.[i] || '', s.x + 22, s.y - 4);
+    ctx.fillStyle = hexA(rail.color, 0.95);
+    ctx.fillText(rail.symbol, s.x + 22, s.y - 4);
     ctx.fillStyle = 'rgba(107,127,156,0.85)';
     ctx.font = '9px ui-monospace, Menlo, monospace';
-    ctx.fillText(opts.addrs?.[i] || '', s.x + 22, s.y + 9);
-  }
+    ctx.fillText(rail.label, s.x + 22, s.y + 9);
+  });
 }
 
-function hexA(hex, a) {
-  const h = hex.replace('#', '');
-  const n = parseInt(h.length === 3 ? h.split('').map((c) => c + c).join('') : h, 16);
-  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
-}
-
-function bezier(s, core, t) {
-  const midX = (s.x + core.x) / 2;
-  const cp = { x: midX, y: s.y + (core.y - s.y) * 0.15 };
-  const x = (1 - t) * (1 - t) * (s.x + 26) + 2 * (1 - t) * t * cp.x + t * t * (core.x - 30);
-  const y = (1 - t) * (1 - t) * s.y + 2 * (1 - t) * t * cp.y + t * t * core.y;
-  return { x, y };
-}
-
-function startFlow(payments) {
+function startFlow(perToken, payments) {
   cancelAnimationFrame(flow.raf);
   const ctx = setupCanvas();
   const { w, h } = flow.size;
-  const { core, sources } = nodePositions(w, h);
 
-  const railPayments = payments.slice(0, 2);
-  const colors = railPayments.map((p) => RAIL_COLOR[p.token.symbol] || '#5ee6ff');
-  const labels = railPayments.map((p) => p.token.symbol);
-  const addrs = railPayments.map((p) => shortAddr(p.payer, 6, 4));
+  const rails = (perToken || []).slice(0, 4).map((t) => ({
+    symbol: t.symbol,
+    color: RAIL_COLOR[t.symbol] || '#5ee6ff',
+    label: `${amountText(t.amount)} ${t.symbol}`,
+  }));
+  const railIndex = new Map(rails.map((r, i) => [r.symbol, i]));
 
-  const base = { count: railPayments.length, colors, labels, addrs, animate: !reduceMotion.matches };
+  const items = (payments || []).slice(0, 8).map((p) => ({
+    rail: railIndex.has(p.token.symbol) ? railIndex.get(p.token.symbol) : 0,
+    usd: p.usd,
+    color: RAIL_COLOR[p.token.symbol] || '#5ee6ff',
+  }));
+
+  const scene = { rails, animate: !reduceMotion.matches };
 
   if (reduceMotion.matches) {
-    drawScene(ctx, w, h, { ...base, animate: false });
-    // static coins resting on the rails
-    railPayments.forEach((p, i) => {
+    drawScene(ctx, w, h, { ...scene, animate: false });
+    const { core, sources } = nodePositions(w, h, rails.length);
+    items.forEach((p) => {
+      const s = sources[p.rail];
+      if (!s) return;
       for (const t of [0.36, 0.62, 0.86]) {
-        const pt = bezier(sources[i], core, t);
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, 4.5, 0, Math.PI * 2);
-        ctx.fillStyle = colors[i];
-        ctx.fill();
+        const pt = curve(s, core, t);
+        ctx.beginPath(); ctx.arc(pt.x, pt.y, 4.5, 0, Math.PI * 2);
+        ctx.fillStyle = p.color; ctx.fill();
       }
     });
     return;
   }
 
-  flow.payments = railPayments;
   flow.particles = [];
   flow.pulses = [];
   flow.t0 = performance.now();
   flow.nextSpawn = 0;
   flow.idx = 0;
+  flow.items = items;
 
   const loop = (now) => {
     const time = now - flow.t0;
-    drawScene(ctx, w, h, { ...base, time });
+    drawScene(ctx, w, h, { ...scene, time });
+    const { core, sources } = nodePositions(w, h, rails.length);
 
-    if (railPayments.length) {
-      if (time > flow.nextSpawn) {
-        const i = flow.idx % railPayments.length;
-        flow.idx += 1;
-        flow.nextSpawn = time + Math.max(1100, 2600 / Math.max(1, railPayments.length));
-        flow.particles.push({ i, born: time, dur: 1500, usd: railPayments[i].usd, color: colors[i] });
-      }
+    if (items.length && time > flow.nextSpawn) {
+      const p = items[flow.idx % items.length];
+      flow.idx += 1;
+      flow.nextSpawn = time + Math.max(900, 2800 / Math.max(1, items.length));
+      flow.particles.push({ ...p, born: time, dur: 1500 });
     }
 
-    const core2 = core;
-    flow.particles = flow.particles.filter((pt) => time - pt.born < pt.dur + 420);
+    flow.particles = flow.particles.filter((pt) => time - pt.born < 1920);
     for (const pt of flow.particles) {
+      const src = sources[pt.rail];
+      if (!src) continue;
       const raw = (time - pt.born) / pt.dur;
       const t = Math.min(1, raw);
-      const src = sources[pt.i % sources.length];
-      const pos = bezier(src, core2, t);
-      const landed = raw >= 1;
+      const pos = curve(src, core, t);
       const age = time - pt.born - pt.dur;
 
-      if (!landed) {
-        // trailing glow
+      if (raw < 1) {
         for (let k = 1; k <= 4; k++) {
-          const tt = Math.max(0, t - k * 0.045);
-          const trail = bezier(src, core2, tt);
-          ctx.beginPath();
-          ctx.arc(trail.x, trail.y, 5 - k * 0.9, 0, Math.PI * 2);
-          ctx.fillStyle = hexA(pt.color, 0.22 - k * 0.045);
-          ctx.fill();
+          const trail = curve(src, core, Math.max(0, t - k * 0.045));
+          ctx.beginPath(); ctx.arc(trail.x, trail.y, 5 - k * 0.9, 0, Math.PI * 2);
+          ctx.fillStyle = hexA(pt.color, 0.22 - k * 0.045); ctx.fill();
         }
-        ctx.beginPath();
-        ctx.arc(pos.x, pos.y, 5.4, 0, Math.PI * 2);
-        ctx.fillStyle = pt.color;
-        ctx.shadowColor = pt.color;
-        ctx.shadowBlur = 16;
-        ctx.fill();
-        ctx.shadowBlur = 0;
+        ctx.beginPath(); ctx.arc(pos.x, pos.y, 5.4, 0, Math.PI * 2);
+        ctx.fillStyle = pt.color; ctx.shadowColor = pt.color; ctx.shadowBlur = 16; ctx.fill(); ctx.shadowBlur = 0;
       } else if (age < 700) {
-        if (!pt.fired) {
-          pt.fired = true;
-          flow.pulses.push({ born: time, color: pt.color });
-        }
+        if (!pt.fired) { pt.fired = true; flow.pulses.push({ born: time, color: pt.color }); }
         const k = age / 700;
-        ctx.beginPath();
-        ctx.arc(core2.x, core2.y, 22 + k * 46, 0, Math.PI * 2);
-        ctx.strokeStyle = hexA(pt.color, 0.55 * (1 - k));
-        ctx.lineWidth = 2;
-        ctx.stroke();
+        ctx.beginPath(); ctx.arc(core.x, core.y, 22 + k * 46, 0, Math.PI * 2);
+        ctx.strokeStyle = hexA(pt.color, 0.55 * (1 - k)); ctx.lineWidth = 2; ctx.stroke();
         if (pt.usd != null) {
           ctx.font = '700 12px ui-monospace, Menlo, monospace';
           ctx.textAlign = 'center';
           ctx.fillStyle = hexA(pt.color, 1 - k);
-          ctx.fillText(`+${money(pt.usd)}`, core2.x, core2.y - 34 - k * 30);
+          ctx.fillText(`+${money(pt.usd)}`, core.x, core.y - 34 - k * 30);
         }
       }
     }
 
-    // ambient pulses on the core
     for (const p of flow.pulses) {
       const k = (time - p.born) / 1100;
       if (k < 1) {
-        ctx.beginPath();
-        ctx.arc(core2.x, core2.y, 26 + k * 70, 0, Math.PI * 2);
-        ctx.strokeStyle = hexA(p.color, 0.35 * (1 - k));
-        ctx.lineWidth = 1.4;
-        ctx.stroke();
+        ctx.beginPath(); ctx.arc(core.x, core.y, 26 + k * 70, 0, Math.PI * 2);
+        ctx.strokeStyle = hexA(p.color, 0.35 * (1 - k)); ctx.lineWidth = 1.4; ctx.stroke();
       }
     }
     flow.pulses = flow.pulses.filter((p) => time - p.born < 1100);
@@ -458,181 +683,22 @@ function startFlow(payments) {
   flow.raf = requestAnimationFrame(loop);
 }
 
-/* ------------------------------- data (static build) -------------------------------
-   No backend: payments are embedded facts, prices come from CoinGecko (CORS-enabled),
-   confirmations from a public Base RPC. Everything degrades gracefully if a fetch fails.
-*/
+/* ------------------------------- boot ------------------------------- */
 
-const ENDPOINT = '0x0009b5e129cbc8d731ba23d99e876faf517c257d';
-const TREASURY = '0x8e35a75ab40270922ad16e003d426612cd23bef6';
-const IMPLEMENTATION = '0x087ea08d519a4f5100dbc096f77b67c20e4480af';
-const PRICE_TTL_MS = 60_000;
-const CACHE_KEY = 'podgate.prices.v1';
-
-const PAYMENTS = [
-  {
-    hash: '0x1c0dff041806b072d9a2f86bfae6c1849c4298bbb1757cd3030b862d1ef09453',
-    block: 53030011,
-    ts: '2026-10-24T13:42:49.000Z',
-    method: 'buyCredits',
-    payer: '0x154f5e21835ad6d2bf2808577aeae5cba57c4710',
-    rawAmount: '10366991499066970765',
-    decimals: 18,
-    token: { symbol: 'POD', name: 'Dolphin', cgId: 'dolphin-2', address: '0xed664536023d8e4b1640c394777d34abaff1df8f' },
-  },
-  {
-    hash: '0x3615f146cdbfd02aa0414a7d848ebc0796f7b79193d88163815bd8ed03c7367e',
-    block: 52991674,
-    ts: '2026-10-23T16:24:55.000Z',
-    method: 'buyCreditsWithETH',
-    payer: '0x3549d5e347ad00a030a420037ff2ed780c805ab3',
-    rawAmount: '2079457364341085',
-    decimals: 18,
-    token: { symbol: 'ETH', name: 'Ether', cgId: 'ethereum', address: '0x0000000000000000000000000000000000000000' },
-  },
-];
-
-const round = (n, dp) => Math.round(n * 10 ** dp) / 10 ** dp;
-
-function readPriceCache() {
-  try {
-    const raw = localStorage.getItem(CACHE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : null;
-  } catch { return null; }
-}
-
-function writePriceCache(data) {
-  try { localStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch { /* private mode */ }
-}
-
-async function fetchPrices(force = false) {
-  const cached = readPriceCache();
-  const fresh = cached && Date.now() - new Date(cached.updatedAt).getTime() < PRICE_TTL_MS;
-  if (!force && fresh) return { ...cached, stale: false, error: null };
-
-  try {
-    const url = 'https://api.coingecko.com/api/v3/simple/price?ids=dolphin-2,ethereum&vs_currencies=usd';
-    const res = await fetch(url, { headers: { accept: 'application/json' } });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json();
-    const data = {
-      eth: json.ethereum ? json.ethereum.usd : null,
-      pod: json['dolphin-2'] ? json['dolphin-2'].usd : null,
-      updatedAt: new Date().toISOString(),
-    };
-    if (data.eth == null && data.pod == null) throw new Error('unexpected payload');
-    writePriceCache(data);
-    return { ...data, stale: false, error: null };
-  } catch (err) {
-    if (cached) return { ...cached, stale: true, error: err.message };
-    return { eth: null, pod: null, updatedAt: null, stale: true, error: err.message };
-  }
-}
-
-async function rpc(method, params) {
-  const res = await fetch('https://mainnet.base.org', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-  });
-  if (!res.ok) throw new Error(`rpc ${res.status}`);
-  const body = await res.json();
-  if (body.error) throw new Error(body.error.message);
-  return body.result;
-}
-
-async function fetchChain() {
-  try {
-    const head = parseInt(await rpc('eth_blockNumber', []), 16);
-    const receipts = {};
-    await Promise.all(PAYMENTS.map(async (p) => {
-      try {
-        const r = await rpc('eth_getTransactionReceipt', [p.hash]);
-        receipts[p.hash] = r ? { status: parseInt(r.status, 16), block: parseInt(r.blockNumber, 16) } : null;
-      } catch { receipts[p.hash] = null; }
-    }));
-    return { head, receipts, error: null };
-  } catch (err) {
-    return { head: null, receipts: {}, error: err.message };
-  }
-}
-
-function buildStats({ prices, chain }) {
-  const rate = (cgId) => (cgId === 'ethereum' ? prices.eth : cgId === 'dolphin-2' ? prices.pod : null);
-
-  const rows = PAYMENTS.map((p) => {
-    const amount = Number(p.rawAmount) / 10 ** p.decimals;
-    const price = rate(p.token.cgId);
-    const usd = typeof price === 'number' ? round(amount * price, 2) : null;
-    const rcpt = chain.receipts[p.hash];
-    return {
-      hash: p.hash, ts: p.ts, block: p.block, method: p.method, payer: p.payer,
-      token: p.token,
-      amount,
-      amountLabel: amount.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 6 }),
-      price: typeof price === 'number' ? price : null,
-      usd,
-      status: rcpt ? (rcpt.status === 1 ? 'confirmed' : 'failed') : 'unknown',
-      confirmations: chain.head && rcpt ? Math.max(0, chain.head - rcpt.block) : null,
-      explorer: `https://basescan.org/tx/${p.hash}`,
-    };
-  });
-
-  const priced = rows.filter((r) => r.usd !== null);
-  const totalUsd = priced.length ? round(priced.reduce((s, r) => s + r.usd, 0), 2) : null;
-
-  const byToken = new Map();
-  for (const r of rows) {
-    const cur = byToken.get(r.token.symbol) || { symbol: r.token.symbol, name: r.token.name, amount: 0, usd: 0, priced: true, payments: 0 };
-    cur.amount += r.amount;
-    cur.payments += 1;
-    if (r.usd === null) cur.priced = false; else cur.usd += r.usd;
-    byToken.set(r.token.symbol, cur);
-  }
-  const perToken = [...byToken.values()]
-    .map((t) => ({ ...t, amount: round(t.amount, 6), usd: t.priced ? round(t.usd, 2) : null, share: totalUsd && t.usd ? round((t.usd / totalUsd) * 100, 1) : null }))
-    .sort((a, b) => (b.usd || 0) - (a.usd || 0));
-
-  return {
-    generatedAt: new Date().toISOString(),
-    chainId: 8453,
-    prices: { ...prices, source: 'coingecko', ttlSeconds: PRICE_TTL_MS / 1000 },
-    chain: { head: chain.head, error: chain.error },
-    totals: {
-      usd: totalUsd,
-      payments: rows.length,
-      pricedPayments: priced.length,
-      firstAt: rows.length ? rows[rows.length - 1].ts : null,
-      lastAt: rows.length ? rows[0].ts : null,
-    },
-    perToken,
-    payments: rows,
-    endpoint: {
-      address: ENDPOINT,
-      implementation: IMPLEMENTATION,
-      treasury: TREASURY,
-      explorer: `https://basescan.org/address/${ENDPOINT}`,
-    },
-  };
-}
-
-async function load({ force = false } = {}) {
+async function load({ force = false, silent = false } = {}) {
   const btn = $('#refresh');
-  btn.disabled = true; btn.classList.add('busy');
+  if (!silent) { btn.disabled = true; btn.classList.add('busy'); }
   try {
-    const prices = await fetchPrices(force);
-    const chain = await fetchChain();
+    const stats = await buildStats({ force });
     state.error = null;
     renderBanner();
-    render(buildStats({ prices, chain }));
+    render(stats);
 
-    if (prices.error) {
-      state.error = `Live rates unavailable (${prices.error})${prices.updatedAt ? ' — showing the last cached snapshot.' : '.'}`;
+    if (stats.source !== 'live') {
+      state.error = `Live on-chain feed unavailable — showing ${stats.source}.`;
       renderBanner();
-    } else if (chain.error) {
-      state.error = `Chain read failed (${chain.error}) — confirmation counts may be stale.`;
+    } else if (stats.prices.stale) {
+      state.error = `Live rates unavailable (${stats.prices.error}) — using the last cached snapshot.`;
       renderBanner();
     }
   } catch (err) {
@@ -644,19 +710,18 @@ async function load({ force = false } = {}) {
 }
 
 $('#refresh').addEventListener('click', () => load({ force: true }));
-window.addEventListener('resize', () => { if (state.stats) startFlow(state.stats.payments || []); });
+window.addEventListener('resize', () => { if (state.stats) startFlow(state.stats.perToken, state.stats.payments); });
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) cancelAnimationFrame(flow.raf);
-  else if (state.stats) startFlow(state.stats.payments || []);
+  else if (state.stats) startFlow(state.stats.perToken, state.stats.payments);
 });
 setInterval(() => {
-  if (state.stats) {
-    $('#updatedNote').textContent = `prices from CoinGecko · updated ${timeAgo(state.stats.prices.updatedAt)}`;
-    $('#rateAge').textContent = state.stats.prices.stale
-      ? 'last good snapshot · live feed degraded'
-      : `refreshed ${timeAgo(state.stats.prices.updatedAt)} · every ${state.stats.prices.ttlSeconds}s`;
-  }
+  if (!state.stats) return;
+  $('#updatedNote').textContent = `live · Blockscout + CoinGecko · updated ${timeAgo(state.stats.prices.updatedAt || state.stats.generatedAt)}`;
+  $('#rateAge').textContent = state.stats.prices.stale
+    ? 'last good snapshot · live feed degraded'
+    : `refreshed ${timeAgo(state.stats.prices.updatedAt)} · every ${state.stats.prices.ttlSeconds}s`;
 }, 1000);
-setInterval(() => load(), 60_000);
+setInterval(() => load({ silent: true }), 60_000);
 
 load();
