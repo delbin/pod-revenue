@@ -44,7 +44,7 @@ const FIXTURE = [
 const KNOWN_TOKENS = {
   [ZERO]: { symbol: 'ETH', name: 'Ether', decimals: 18, cgId: 'ethereum' },
   '0xed664536023d8e4b1640c394777d34abaff1df8f': { symbol: 'POD', name: 'Dolphin', decimals: 18, cgId: 'dolphin-2' },
-  '0xec29311253d37c9682fb7f86fe863202f6f4f988': { symbol: 'xPOD', name: 'xPOD vault', decimals: 18, cgId: null },
+  '0xec29311253d37c9682fb7f86fe863202f6f4f988': { symbol: 'xPOD', name: 'xPOD vault', decimals: 18, cgId: 'dolphin-2', valuedAs: 'POD' },
   '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913': { symbol: 'USDC', name: 'USD Coin', decimals: 6, cgId: 'usd-coin' },
   '0xfde4c96c8593536e31f229ea8f37b2ada2699bb2': { symbol: 'USDT', name: 'Tether USD', decimals: 6, cgId: 'l2-standard-bridged-usdt-base' },
   '0xacfe6019ed1a7dc6f7b508c02d1b04ec88cc21bf': { symbol: 'VVV', name: 'Venice Token', decimals: 18, cgId: 'venice-token' },
@@ -269,6 +269,7 @@ async function buildStats({ force = false } = {}) {
       payer: r.payer,
       method: r.tokenAddress === ZERO ? 'buyCreditsWithETH' : 'buyCredits',
       token: { symbol: meta.symbol, address: r.tokenAddress },
+      valuedAs: meta.valuedAs || null,
       amount,
       amountLabel: amountText(amount),
       price,
@@ -284,7 +285,7 @@ async function buildStats({ force = false } = {}) {
 
   const byToken = new Map();
   for (const p of payments) {
-    const cur = byToken.get(p.token.symbol) || { symbol: p.token.symbol, amount: 0, usd: 0, priced: true, payments: 0 };
+    const cur = byToken.get(p.token.symbol) || { symbol: p.token.symbol, amount: 0, usd: 0, priced: true, payments: 0, valuedAs: p.valuedAs || null };
     cur.amount += p.amount;
     cur.payments += 1;
     if (p.usd == null) cur.priced = false; else cur.usd += p.usd;
@@ -319,6 +320,7 @@ function renderBanner() {
 function priceForToken(s, t) {
   if (t.symbol === 'ETH') return s.prices.map.ethereum ?? null;
   if (t.symbol === 'POD') return s.prices.map['dolphin-2'] ?? null;
+  if (t.valuedAs === 'POD') return s.prices.map['dolphin-2'] ?? null; // xPOD is pegged to POD
   return t.priced && t.amount ? t.usd / t.amount : null;
 }
 
@@ -364,7 +366,7 @@ function renderRails(s) {
       <span class="rail-bar"><span style="width:${pct}%"></span></span>
       <span>
         <span class="rail-usd" style="color:${t.usd == null ? 'var(--muted)' : 'var(--text)'}">${t.usd == null ? 'unpriced' : money(t.usd)}</span>
-        <span class="rail-amt">${amountText(t.amount)} ${t.symbol}</span>
+        <span class="rail-amt">${amountText(t.amount)} ${t.symbol}${t.valuedAs ? ` · as ${t.valuedAs}` : ''}</span>
       </span>`;
     ul.appendChild(li);
   }
@@ -427,7 +429,7 @@ function renderLedger(s) {
       <div class="cell">
         <span class="cell-k">Amount</span>
         <span class="amt">${p.amountLabel} <small>${p.token.symbol}</small></span>
-        <span class="method">rate ${p.price == null ? '—' : (p.price < 1 ? usdFmtSmall.format(p.price) : money(p.price))}</span>
+        <span class="method">rate ${p.price == null ? '—' : (p.price < 1 ? usdFmtSmall.format(p.price) : money(p.price))}${p.valuedAs ? ` · as ${p.valuedAs}` : ''}</span>
       </div>
       <div class="cell">
         <span class="cell-k">USD value</span>

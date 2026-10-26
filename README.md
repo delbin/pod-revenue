@@ -40,10 +40,12 @@ All six assets whitelisted on the endpoint render as their own rail:
 | USDC | `0x8335…913` | 6 | CoinGecko `usd-coin` |
 | USDT | `0xfde4…bb2` | 6 | CoinGecko `l2-standard-bridged-usdt-base` |
 | VVV | `0xacfe…1bf` | 18 | CoinGecko `venice-token` |
-| xPOD | `0xec29…988` | 18 | not listed — shown as **unpriced** |
+| xPOD | `0xec29…988` | 18 | valued at the **POD rate** (`KNOWN_TOKENS` → `valuedAs: 'POD'`), labelled "as POD" |
 
 CoinGecko's `/coins/base/contract/<address>` endpoint sends no CORS headers, so ids are pinned in
-`KNOWN_TOKENS` rather than resolved at runtime. Unknown tokens fall back to RPC `symbol()`/`decimals()`
+`KNOWN_TOKENS` rather than resolved at runtime. xPOD has no listing, so it is valued 1:1 with POD
+(`valuedAs: 'POD'`); every place it appears says "as POD". Swap that for `cgId` once it's listed, or
+for the vault's `convertToAssets` rate (~1.00022 POD/share) if you want mark-to-vault. Unknown tokens fall back to RPC `symbol()`/`decimals()`
 and are rendered as **unpriced**: visible in the rail list and ledger, excluded from the USD total,
 with the count called out under "Total revenue".
 
