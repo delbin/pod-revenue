@@ -859,7 +859,7 @@ setInterval(() => {
   $('#updatedNote').textContent = `${refreshLabel()} · CoinGecko + on-chain checkpoint · updated ${timeAgo(state.stats.prices.updatedAt || state.stats.generatedAt)}`;
   $('#rateAge').textContent = state.stats.prices.stale
     ? 'last good snapshot · live feed degraded'
-    : `refreshed ${timeAgo(state.stats.prices.updatedAt)} · every ${state.stats.prices.ttlSeconds}s`;
+    : `refreshed ${timeAgo(state.stats.prices.updatedAt)} · ${refreshLabel()}`;
 }, 1000);
 setInterval(() => load({ silent: true }), REFRESH_MS);
 
