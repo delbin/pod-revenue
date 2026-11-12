@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """Append new APICreditsPurchased events to payments.json straight from the chain.
 
-Runs in GitHub Actions on a schedule. Blockscout's address index lags badly for this
-contract, so the chain (via public Base RPCs) is the source of truth.
+Scope: this only ever queries logs emitted by ONE contract --
+    eth_getLogs{ address: [ENDPOINT], topics: [[APICreditsPurchased]], fromBlock, toBlock }
+Nothing else on the chain is read. Public RPCs cap a single eth_getLogs range at ~1000
+blocks, so the *unscanned gap since the last run* is walked in 1000-block steps. At a
+5-minute cadence that is 1 request (~150 blocks); after a long outage it grows to whatever
+the gap is, and any chunk that cannot be fetched fails the run instead of being skipped.
 
-Only writes when a new payment is found, so the repo stays quiet: if there is nothing
-new, scannedTo does not advance and the next run simply scans a slightly larger window
-(still 1-2 requests for a daily cadence).
+Runs in GitHub Actions on a schedule. Blockscout's address index lags badly for this
+contract, so the chain is the source of truth.
+
+Only writes when a new payment is found, so the repo stays quiet; scannedTo advances only
+on a real write, which keeps the next scan window honest (it re-covers anything not yet
+committed).
 """
 import json
 import random
@@ -58,14 +65,19 @@ def main():
 
     payments = state.get("payments", [])
     known = {str(p["hash"]).lower() for p in payments}
-    start = int(state.get("scannedTo", 0)) + 1
+    if "scannedTo" not in state:
+        raise SystemExit("payments.json has no scannedTo checkpoint; refusing to guess a start block")
+    start = int(state["scannedTo"]) + 1
     head = int(rpc(HEAD_RPC, "eth_blockNumber", [])["result"], 16)
 
     if head < start:
         print(f"already at head ({head})")
         return
 
-    print(f"scanning {start}..{head} ({(head - start) // CHUNK + 1} chunks)")
+    print(f"contract {ENDPOINT}  topic APICreditsPurchased  only")
+    print(f"scanning {start}..{head} ({(head - start) // CHUNK + 1} chunks of {CHUNK} blocks)")
+    if head - start > 500_000:
+        print(f"WARNING: {head - start} blocks behind — that is more than a normal 5-minute gap")
     found = []
     cursor = start
     while cursor <= head:

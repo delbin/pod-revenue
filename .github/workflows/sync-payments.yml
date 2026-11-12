@@ -2,8 +2,8 @@ name: Sync payments
 
 on:
   schedule:
-    # every 15 minutes; GitHub may delay scheduled runs under load
-    - cron: '*/15 * * * *'
+    # every 5 minutes; GitHub may delay scheduled runs by a few minutes under load
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Scan chain for new APICreditsPurchased events
+      - name: Scan for new APICreditsPurchased events on the POD Gate contract
         run: python3 scripts/sync-payments.py
 
       - name: Commit if a payment landed

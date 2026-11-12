@@ -28,7 +28,10 @@ const COINGECKO = 'https://api.coingecko.com/api/v3';
 const TOPIC_BUY = '0x93ece0a7f4cba426dcb3c786e68fb5fd9ce335d154c103376e160ab0dd00379f';
 const ZERO = '0x0000000000000000000000000000000000000000';
 
-const PRICE_TTL_MS = 60_000;
+const REFRESH_MS = 5 * 60_000;      // page refresh + price cache + sync cadence
+const PRICE_TTL_MS = REFRESH_MS;
+const SYNC_STALE_MS = 20 * 60_000;  // warn if the workflow has not succeeded in this long
+const REPO_API = 'https://api.github.com/repos/delbin/pod-revenue/actions/workflows/sync-payments.yml/runs?per_page=1';
 const KEY_PRICES = 'podgate.prices.v2';
 const KEY_PAYMENTS = 'podgate.payments.v2';
 const KEY_META = 'podgate.meta.v2';
@@ -80,6 +83,8 @@ function fmtDate(iso) {
     time: `${d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })} UTC`,
   };
 }
+
+const refreshLabel = () => (REFRESH_MS >= 60_000 ? `every ${Math.round(REFRESH_MS / 60_000)} min` : `every ${Math.round(REFRESH_MS / 1000)}s`);
 
 const amountText = (v) => v.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 6 });
 
@@ -296,6 +301,33 @@ async function historicalPrice(cgId, iso) {
   }
 }
 
+/* ------------------------------- sync heartbeat -------------------------------
+   The workflow runs every 5 minutes and only commits when a payment lands, so the
+   file's timestamp says nothing about health. Ask GitHub for the latest run instead:
+   if it is failing or old, the page says so rather than quietly showing stale data.
+*/
+
+async function fetchSyncHealth() {
+  try {
+    const r = await fetch(REPO_API, { headers: { accept: 'application/vnd.github+json' } });
+    if (!r.ok) return null;
+    const j = await r.json();
+    const run = (j.workflow_runs || [])[0];
+    if (!run) return { ok: false, conclusion: null, ageMs: null, stale: true, reason: 'no sync runs yet' };
+    const ageMs = Date.now() - new Date(run.updated_at || run.created_at).getTime();
+    return {
+      ok: run.conclusion === 'success',
+      conclusion: run.conclusion,
+      status: run.status,
+      updatedAt: run.updated_at || run.created_at,
+      ageMs,
+      stale: ageMs > SYNC_STALE_MS,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /* ------------------------------- chain status ------------------------------- */
 
 async function fetchChain(rows) {
@@ -321,6 +353,7 @@ async function buildStats({ force = false } = {}) {
   const metas = await Promise.all(rows.map((r) => tokenMeta(r.tokenAddress)));
   const prices = await fetchPrices(metas.map((m) => m.cgId), force);
   const chain = await fetchChain(rows);
+  const sync = await fetchSyncHealth();
 
   const payments = rows.map((r, i) => {
     const meta = metas[i];
@@ -383,6 +416,7 @@ async function buildStats({ force = false } = {}) {
     degraded: !(source.includes('checkpoint') || source.includes('blockscout')),
     prices: { map: prices.map, updatedAt: prices.updatedAt, stale: prices.stale, error: prices.error, ttlSeconds: PRICE_TTL_MS / 1000 },
     chain: { head: chain.head, error: chain.error },
+    sync,
     totals: { usd: totalUsd, usdThen: totalUsdThen, payments: payments.length, priced: priced.length, latest: payments.length ? payments[0].ts : null },
     perToken,
     payments,
@@ -472,7 +506,7 @@ function renderRates(s) {
   }).join('') || '<li><span class="rate-k">—</span><span class="rate-v">—</span></li>';
   $('#rateAge').textContent = s.prices.stale
     ? 'last good snapshot · live feed degraded'
-    : `refreshed ${timeAgo(s.prices.updatedAt)} · every ${s.prices.ttlSeconds}s`;
+    : `refreshed ${timeAgo(s.prices.updatedAt)} · ${refreshLabel()}`;
 }
 
 function renderGate(s) {
@@ -562,7 +596,7 @@ function render(s) {
   renderGate(s);
   renderLedger(s);
   renderLegend(s);
-  $('#updatedNote').textContent = `live · Blockscout + CoinGecko · updated ${timeAgo(s.prices.updatedAt || s.generatedAt)}`;
+  $('#updatedNote').textContent = `${refreshLabel()} · CoinGecko + on-chain checkpoint · updated ${timeAgo(s.prices.updatedAt || s.generatedAt)}`;
   startFlow(s.perToken, s.payments);
 }
 
@@ -797,6 +831,11 @@ async function load({ force = false, silent = false } = {}) {
     if (stats.degraded) {
       state.error = `Live on-chain feed unavailable — showing ${stats.source}.`;
       renderBanner();
+    } else if (stats.sync && (stats.sync.ok === false || stats.sync.stale)) {
+      state.error = stats.sync.ok === false
+        ? `Payment sync last run ${stats.sync.conclusion || 'did not finish'} — new payments may be missing.`
+        : `Payment sync last succeeded ${timeAgo(stats.sync.updatedAt)} — new payments may be missing.`;
+      renderBanner();
     } else if (stats.prices.stale) {
       state.error = `Live rates unavailable (${stats.prices.error}) — using the last cached snapshot.`;
       renderBanner();
@@ -817,11 +856,11 @@ document.addEventListener('visibilitychange', () => {
 });
 setInterval(() => {
   if (!state.stats) return;
-  $('#updatedNote').textContent = `live · Blockscout + CoinGecko · updated ${timeAgo(state.stats.prices.updatedAt || state.stats.generatedAt)}`;
+  $('#updatedNote').textContent = `${refreshLabel()} · CoinGecko + on-chain checkpoint · updated ${timeAgo(state.stats.prices.updatedAt || state.stats.generatedAt)}`;
   $('#rateAge').textContent = state.stats.prices.stale
     ? 'last good snapshot · live feed degraded'
     : `refreshed ${timeAgo(state.stats.prices.updatedAt)} · every ${state.stats.prices.ttlSeconds}s`;
 }, 1000);
-setInterval(() => load({ silent: true }), 60_000);
+setInterval(() => load({ silent: true }), REFRESH_MS);
 
 load();
