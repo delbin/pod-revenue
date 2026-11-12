@@ -1,0 +1,72 @@
+{
+  "generatedAt": "2026-11-12T15:35:12Z",
+  "endpoint": "0x0009b5e129cbc8d731ba23d99e876faf517c257d",
+  "scannedTo": 56532859,
+  "coverage": "indexer for blocks <= 53366534, chain scan after",
+  "payments": [
+    {
+      "hash": "0x2f2b647a501bd5200c482019945c68af05a0ab003304bdb98700ab41d3af273a",
+      "block": 56517387,
+      "payer": "0x3c6bfa2c5bd711b9fc1dd56018d641c708b9f3b0",
+      "tokenAddress": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "rawAmount": "5000018",
+      "ts": "2026-11-12T14:30:53Z"
+    },
+    {
+      "hash": "0x5f2880875b338802b4cb341ea752569b97b14f010e11ce6bb40ae55a3f67f05d",
+      "block": 56473304,
+      "payer": "0x9868e485b05dbec74963d8d05eff4d1dee4efb55",
+      "tokenAddress": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "rawAmount": "5500001",
+      "ts": "2026-11-12T12:03:56Z"
+    },
+    {
+      "hash": "0x5655bb341cb2d94113c3b6e83264068ac752a465213d39c4e5f2c42f7fb3564c",
+      "block": 56446054,
+      "payer": "0x9868e485b05dbec74963d8d05eff4d1dee4efb55",
+      "tokenAddress": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "rawAmount": "5000011",
+      "ts": "2026-11-12T10:33:06Z"
+    },
+    {
+      "hash": "0x3e3c58c3a368c19b5a7282b57a044408cc90ee18398007cea06e9cf1abff1301",
+      "block": 53423339,
+      "payer": "0x56142a47aac5b8d002096ac462e11d1e683e9c60",
+      "tokenAddress": "0x0000000000000000000000000000000000000000",
+      "rawAmount": "3526985601486298",
+      "ts": "2026-11-02T16:13:45Z"
+    },
+    {
+      "hash": "0x9e625bca5fe735d620758ed83f2a81f844ed01e4f685d2e92f48234a57056a0f",
+      "block": 53422951,
+      "payer": "0xaa42d4edbad9b4e5f2b266a2a1151f7c5c30221d",
+      "tokenAddress": "0xed664536023d8e4b1640c394777d34abaff1df8f",
+      "rawAmount": "10155316606929510480",
+      "ts": "2026-11-02T16:00:49Z"
+    },
+    {
+      "hash": "0xa44a39d923c333e18cfde6d6b3bd3b8972c4ed438e824087e0e6fbf152601235",
+      "block": 53366534,
+      "ts": "2026-11-01T08:40:15Z",
+      "payer": "0x912737CB73856c01c06e3cbEb87Ad6ae52A760D9",
+      "tokenAddress": "0x0000000000000000000000000000000000000000",
+      "rawAmount": "4398286937901498"
+    },
+    {
+      "hash": "0x1c0dff041806b072d9a2f86bfae6c1849c4298bbb1757cd3030b862d1ef09453",
+      "block": 53030011,
+      "ts": "2026-10-24T13:42:49Z",
+      "payer": "0x154f5E21835aD6D2bF2808577Aeae5CBa57C4710",
+      "tokenAddress": "0xed664536023d8e4b1640c394777d34abaff1df8f",
+      "rawAmount": "10366991499066970765"
+    },
+    {
+      "hash": "0x3615f146cdbfd02aa0414a7d848ebc0796f7b79193d88163815bd8ed03c7367e",
+      "block": 52991674,
+      "ts": "2026-10-23T16:24:55Z",
+      "payer": "0x3549d5E347Ad00A030A420037Ff2ED780c805aB3",
+      "tokenAddress": "0x0000000000000000000000000000000000000000",
+      "rawAmount": "2079457364341085"
+    }
+  ]
+}

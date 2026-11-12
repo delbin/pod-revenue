@@ -198,15 +198,47 @@ async function fetchPaymentsLive() {
 }
 
 async function resolvePayments() {
+  const labels = [];
+  const byHash = new Map();
+  let checkpoint = null;
+
+  // 1. Authoritative checkpoint, rebuilt from chain logs by the scheduled workflow.
+  try {
+    const j = await getJson(`payments.json?t=${Date.now()}`);
+    if (j && Array.isArray(j.payments) && j.payments.length) {
+      checkpoint = { generatedAt: j.generatedAt, scannedTo: j.scannedTo, count: j.payments.length };
+      for (const p of j.payments) {
+        if (!p || !p.hash) continue;
+        byHash.set(String(p.hash).toLowerCase(), {
+          hash: p.hash, block: Number(p.block), ts: p.ts,
+          payer: p.payer, tokenAddress: String(p.tokenAddress).toLowerCase(), rawAmount: String(p.rawAmount),
+        });
+      }
+      labels.push('checkpoint');
+    }
+  } catch { /* no checkpoint yet */ }
+
+  // 2. Blockscout's address index — normally lags the chain, but catches anything the file missed.
   try {
     const rows = await fetchPaymentsLive();
-    writeCache(KEY_PAYMENTS, { at: new Date().toISOString(), rows });
-    return { rows, source: 'live' };
-  } catch (err) {
+    for (const r of rows) {
+      const k = r.hash.toLowerCase();
+      if (!byHash.has(k)) byHash.set(k, r);
+    }
+    labels.push('blockscout');
+  } catch { /* indexer unavailable */ }
+
+  if (!byHash.size) {
     const cached = readCache(KEY_PAYMENTS);
-    if (cached && cached.rows && cached.rows.length) return { rows: cached.rows, source: `cached snapshot (${err.message})` };
-    return { rows: FIXTURE, source: `bundled snapshot (${err.message})` };
+    if (cached && cached.rows && cached.rows.length) {
+      return { rows: cached.rows, source: `cached snapshot`, checkpoint: null };
+    }
+    return { rows: FIXTURE, source: 'bundled snapshot', checkpoint: null };
   }
+
+  const rows = [...byHash.values()].sort((a, b) => b.block - a.block);
+  writeCache(KEY_PAYMENTS, { at: new Date().toISOString(), rows });
+  return { rows, source: labels.join(' + '), checkpoint };
 }
 
 /* ------------------------------- prices ------------------------------- */
@@ -285,7 +317,7 @@ async function fetchChain(rows) {
 /* ------------------------------- model ------------------------------- */
 
 async function buildStats({ force = false } = {}) {
-  const { rows, source } = await resolvePayments();
+  const { rows, source, checkpoint } = await resolvePayments();
   const metas = await Promise.all(rows.map((r) => tokenMeta(r.tokenAddress)));
   const prices = await fetchPrices(metas.map((m) => m.cgId), force);
   const chain = await fetchChain(rows);
@@ -347,6 +379,8 @@ async function buildStats({ force = false } = {}) {
   return {
     generatedAt: new Date().toISOString(),
     source,
+    checkpoint,
+    degraded: !(source.includes('checkpoint') || source.includes('blockscout')),
     prices: { map: prices.map, updatedAt: prices.updatedAt, stale: prices.stale, error: prices.error, ttlSeconds: PRICE_TTL_MS / 1000 },
     chain: { head: chain.head, error: chain.error },
     totals: { usd: totalUsd, usdThen: totalUsdThen, payments: payments.length, priced: priced.length, latest: payments.length ? payments[0].ts : null },
@@ -445,7 +479,7 @@ function renderGate(s) {
   $('#arrivalsVal').textContent = String(s.totals.payments);
   $('#heldVal').textContent = '0';
   const chip = $('#gateChip');
-  const degraded = s.prices.stale || !s.chain.head || s.source !== 'live';
+  const degraded = s.prices.stale || !s.chain.head || s.degraded;
   chip.textContent = degraded ? 'DEGRADED' : 'ONLINE';
   chip.className = `chip ${degraded ? 'warn' : 'ok'}`;
   const a = $('#gateAddr');
@@ -760,7 +794,7 @@ async function load({ force = false, silent = false } = {}) {
     renderBanner();
     render(stats);
 
-    if (stats.source !== 'live') {
+    if (stats.degraded) {
       state.error = `Live on-chain feed unavailable — showing ${stats.source}.`;
       renderBanner();
     } else if (stats.prices.stale) {

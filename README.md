@@ -13,21 +13,42 @@ Live, dependency-free dashboard for the **POD API-credit payment endpoint** on B
 3. An animated "incoming flow" visualisation of arrivals into the treasury
 4. A transaction ledger — amount, token, rate, USD value, confirmations, payer, and a Basescan link per transaction
 
-## How it works — it updates itself
+## How it works — and why the chain, not an indexer
 
-No build step, no backend, no dependencies. Three files: `index.html`, `styles.css`, `app.js`.
+**Blockscout's address index lags badly for this contract** (it stopped listing new
+transactions around 1 Nov while the chain kept receiving payments). An earlier build read
+`APICreditsPurchased` from Blockscout and silently under-reported. That is fixed:
 
 | Data | Source | Refresh |
 |---|---|---|
-| Payments | Blockscout indexed `APICreditsPurchased` logs (`/api/v2/addresses/<endpoint>/logs`) | every 60s |
-| USD prices | CoinGecko (`simple/price`, ids resolved per token) | every 60s, `localStorage` cache |
-| Confirmations | Base public RPC (`eth_blockNumber`, `eth_getTransactionReceipt`) | every 60s |
+| Payments | `payments.json` — scanned directly from Base logs | every 15 min (workflow) |
+| USD prices | CoinGecko `simple/price` | every 60s in-browser |
+| Confirmations | public Base RPC (`eth_blockNumber`, receipts) | every 60s in-browser |
+| Indexer rows | Blockscout `/logs` (merged in, may lag or be ahead) | every 60s in-browser |
 
-**A new payment appears on its own within a minute — no rebuild, no commit.** The ledger, per-rail
-totals, USD total and the flow animation all recompute from whatever the feed returns.
+`payments.json` is the authoritative checkpoint: `{ scannedTo, payments: [{ hash, block, ts,
+payer, tokenAddress, rawAmount }] }`. The page loads it, merges Blockscout's rows (deduped by
+hash), and sorts by block — so a lagging indexer can never hide a payment.
 
-Token metadata is resolved at runtime: unlisted tokens get `symbol()`/`decimals()` from the RPC and a
-CoinGecko id from `/coins/base/contract/<address>`, so a new asset shows up priced without a code change.
+### Keeping it current
+
+`.github/workflows/sync-payments.yml` runs `scripts/sync-payments.py` every 15 minutes. It
+scans from `scannedTo + 1` to head in 1000-block chunks (public RPCs cap `eth_getLogs` at
+1000 blocks), appends any new `APICreditsPurchased` events with their block timestamps, and
+commits only when something new landed. Pages then rebuilds.
+
+To refresh manually: **Actions → Sync payments → Run workflow**, or locally:
+
+```bash
+python3 scripts/sync-payments.py
+git commit -am "sync" && git push
+```
+
+### Coverage note
+
+History up to block `53366534` (1 Nov) comes from Blockscout, captured while its index was
+still current and complete; everything after is a direct chain scan. If you ever need to
+re-derive the early history, scan `eth_getLogs` from the deployment block `47141764`.
 
 ### Supported rails
 
