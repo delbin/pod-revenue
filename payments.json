@@ -1,9 +1,16 @@
 {
-  "generatedAt": "2026-11-24T05:32:13Z",
+  "generatedAt": "2026-11-24T16:12:59Z",
   "endpoint": "0x0009b5e129cbc8d731ba23d99e876faf517c257d",
-  "scannedTo": 61539354,
+  "scannedTo": 61731656,
   "coverage": "indexer for blocks <= 53366534, chain scan after",
   "payments": [
+    {
+      "hash": "0x8eee6575b6f5079af324444d34b63a6447e9a1e440f3abe3be7a846778dbb160",
+      "block": 61581170,
+      "payer": "0x3c684a86b7581185a5d8610fd6f9ad13154edefc",
+      "tokenAddress": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "rawAmount": "5000025"
+    },
     {
       "hash": "0x2857d866c0eb94e84d2d92f65877591e4d1439546c655dd3e866c9ac5aadde43",
       "block": 61408972,
