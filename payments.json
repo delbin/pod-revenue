@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-24T16:12:59Z",
+  "generatedAt": "2026-11-26T16:15:25Z",
   "endpoint": "0x0009b5e129cbc8d731ba23d99e876faf517c257d",
   "scannedTo": 61731656,
   "coverage": "indexer for blocks <= 53366534, chain scan after",
@@ -9,35 +9,40 @@
       "block": 61581170,
       "payer": "0x3c684a86b7581185a5d8610fd6f9ad13154edefc",
       "tokenAddress": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
-      "rawAmount": "5000025"
+      "rawAmount": "5000025",
+      "ts": "2026-11-24T07:50:09Z"
     },
     {
       "hash": "0x2857d866c0eb94e84d2d92f65877591e4d1439546c655dd3e866c9ac5aadde43",
       "block": 61408972,
       "payer": "0xc90d9482e82c8858ee5c51cb4fa0cedc7394ca69",
       "tokenAddress": "0x0000000000000000000000000000000000000000",
-      "rawAmount": "2904879048790487"
+      "rawAmount": "2904879048790487",
+      "ts": "2026-11-23T22:16:10Z"
     },
     {
       "hash": "0xc676ae9c9a6f517771f4f5e149ccfd2438e54fc733f6fc9089b33cd0c1e302b9",
       "block": 61149988,
       "payer": "0xe928e1c5bcea6920b5a9a7133bea314d57772ba1",
       "tokenAddress": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
-      "rawAmount": "5990016"
+      "rawAmount": "5990016",
+      "ts": "2026-11-23T07:52:53Z"
     },
     {
       "hash": "0xa4c2b6718438b632e62db9b974bd659389afae06eec36573bcff34160ad94cd5",
       "block": 59541012,
       "payer": "0xbe9eebc220e70f4f6941369b5125525116f8aeb2",
       "tokenAddress": "0xed664536023d8e4b1640c394777d34abaff1df8f",
-      "rawAmount": "23792529145848203664"
+      "rawAmount": "23792529145848203664",
+      "ts": "2026-11-19T14:29:38Z"
     },
     {
       "hash": "0xbad15944df9a0ca4cf7922ba9a5bab3a253cc36a8e87d5cc4af78facbb727122",
       "block": 57194937,
       "payer": "0x3c6bfa2c5bd711b9fc1dd56018d641c708b9f3b0",
       "tokenAddress": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
-      "rawAmount": "5000014"
+      "rawAmount": "5000014",
+      "ts": "2026-11-14T04:09:23Z"
     },
     {
       "hash": "0x2f2b647a501bd5200c482019945c68af05a0ab003304bdb98700ab41d3af273a",

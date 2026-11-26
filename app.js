@@ -66,8 +66,10 @@ function shortAddr(a, front = 6, back = 4) {
   return `${a.slice(0, front)}…${a.slice(-back)}`;
 }
 
+const validTs = (iso) => Boolean(iso) && Number.isFinite(new Date(iso).getTime());
+
 function timeAgo(iso) {
-  if (!iso) return '—';
+  if (!validTs(iso)) return '—';
   const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
   if (s < 60) return `${s}s ago`;
   const m = Math.round(s / 60);
@@ -78,6 +80,7 @@ function timeAgo(iso) {
 
 function fmtDate(iso) {
   const d = new Date(iso);
+  if (!validTs(iso)) return { date: '—', time: 'timestamp unavailable' };
   return {
     date: d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' }),
     time: `${d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })} UTC`,
@@ -202,6 +205,17 @@ async function fetchPaymentsLive() {
   return unique;
 }
 
+/* A checkpoint row can arrive without a ts (writer bug, hand edit). Read the block instead. */
+async function fillMissingTimestamps(rows) {
+  const targets = rows.filter((r) => !validTs(r.ts)).slice(0, 12);
+  await Promise.all(targets.map(async (r) => {
+    try {
+      const blk = await rpc('eth_getBlockByNumber', ['0x' + Number(r.block).toString(16), false]);
+      if (blk && blk.timestamp) r.ts = new Date(parseInt(blk.timestamp, 16) * 1000).toISOString();
+    } catch { /* stays "timestamp unavailable" rather than "Invalid Date" */ }
+  }));
+}
+
 async function resolvePayments() {
   const labels = [];
   const byHash = new Map();
@@ -228,7 +242,9 @@ async function resolvePayments() {
     const rows = await fetchPaymentsLive();
     for (const r of rows) {
       const k = r.hash.toLowerCase();
-      if (!byHash.has(k)) byHash.set(k, r);
+      const seen = byHash.get(k);
+      if (!seen) byHash.set(k, r);
+      else if (!validTs(seen.ts) && validTs(r.ts)) seen.ts = r.ts; // checkpoint row lost its timestamp
     }
     labels.push('blockscout');
   } catch { /* indexer unavailable */ }
@@ -350,6 +366,7 @@ async function fetchChain(rows) {
 
 async function buildStats({ force = false } = {}) {
   const { rows, source, checkpoint } = await resolvePayments();
+  await fillMissingTimestamps(rows);
   const metas = await Promise.all(rows.map((r) => tokenMeta(r.tokenAddress)));
   const prices = await fetchPrices(metas.map((m) => m.cgId), force);
   const chain = await fetchChain(rows);

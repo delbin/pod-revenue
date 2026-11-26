@@ -59,6 +59,44 @@ def get_logs(start, end):
     raise SystemExit(f"could not fetch logs for {start}-{end}")
 
 
+def block_ts(block):
+    """Timestamp of one block as an ISO-8601 UTC string, or None if no provider answered."""
+    for attempt in range(4):
+        try:
+            # rpc() returns the whole JSON-RPC envelope, so read the result first.
+            blk = rpc(HEAD_RPC, "eth_getBlockByNumber", [hex(block), False])["result"]
+            if not blk or "timestamp" not in blk:
+                raise RuntimeError("block has no timestamp")
+            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(blk["timestamp"], 16)))
+        except Exception as exc:  # noqa: BLE001 - retry, then leave the row for the next run
+            print(f"  retry timestamp block {block}: {exc}", flush=True)
+            time.sleep(1 + attempt)
+    return None
+
+
+def backfill_timestamps(payments):
+    """Repair rows that were written without a ts; the lookup is best-effort, never fatal."""
+    missing = [p for p in payments if not p.get("ts")]
+    if not missing:
+        return 0
+    print(f"backfilling {len(missing)} payment(s) that had no timestamp")
+    for p in missing:
+        ts = block_ts(int(p["block"]))
+        if ts:
+            p["ts"] = ts
+            print("  =", ts, p["block"], p["hash"])
+    return sum(1 for p in missing if p.get("ts"))
+
+
+def save(state, payments):
+    payments.sort(key=lambda p: p["block"], reverse=True)
+    state["payments"] = payments
+    state["generatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with open(FILE, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, indent=2)
+        fh.write("\n")
+
+
 def main():
     with open(FILE, encoding="utf-8") as fh:
         state = json.load(fh)
@@ -70,8 +108,13 @@ def main():
     start = int(state["scannedTo"]) + 1
     head = int(rpc(HEAD_RPC, "eth_blockNumber", [])["result"], 16)
 
+    repaired = backfill_timestamps(payments)
+
     if head < start:
         print(f"already at head ({head})")
+        if repaired:
+            save(state, payments)
+            print(f"rewrote {FILE} with {repaired} repaired timestamp(s); checkpoint stays {state['scannedTo']}")
         return
 
     print(f"contract {ENDPOINT}  topic APICreditsPurchased  only")
@@ -104,26 +147,21 @@ def main():
 
     if not fresh:
         print("no new payments; leaving checkpoint unchanged")
+        if repaired:
+            save(state, payments)
+            print(f"rewrote {FILE} with {repaired} repaired timestamp(s); checkpoint stays {state['scannedTo']}")
         return
 
     for p in fresh:
-        for attempt in range(4):
-            try:
-                blk = rpc(HEAD_RPC, "eth_getBlockByNumber", [hex(p["block"]), False])
-                p["ts"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(blk["timestamp"], 16)))
-                break
-            except Exception:  # noqa: BLE001
-                time.sleep(1 + attempt)
+        ts = block_ts(p["block"])
+        if ts:
+            p["ts"] = ts
+        else:
+            print(f"  WARNING no timestamp for {p['hash']} yet; the next run backfills it", flush=True)
 
     payments.extend(fresh)
-    payments.sort(key=lambda p: p["block"], reverse=True)
-    state["payments"] = payments
     state["scannedTo"] = head
-    state["generatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-    with open(FILE, "w", encoding="utf-8") as fh:
-        json.dump(state, fh, indent=2)
-        fh.write("\n")
+    save(state, payments)
 
     print(f"added {len(fresh)} payment(s); checkpoint now {head}")
     for p in fresh:
