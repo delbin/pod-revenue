@@ -11,9 +11,11 @@ the gap is, and any chunk that cannot be fetched fails the run instead of being 
 Runs in GitHub Actions on a schedule. Blockscout's address index lags badly for this
 contract, so the chain is the source of truth.
 
-Only writes when a new payment is found, so the repo stays quiet; scannedTo advances only
-on a real write, which keeps the next scan window honest (it re-covers anything not yet
-committed).
+Only commits when there is something to record: a new payment, a backfilled timestamp, or a
+checkpoint that fell more than COMMIT_GAP blocks behind head. Without that last case a quiet
+period would grow the scan window forever (the checkpoint used to move only when a payment
+landed, so every run re-scanned the whole gap). A run also stops after RUN_BUDGET_S and
+commits the blocks it covered, so it always finishes before the next scheduled run.
 """
 import json
 import random
@@ -30,6 +32,12 @@ LOG_RPCS = [
     "https://8453.rpc.thirdweb.com",
 ]
 CHUNK = 1000
+# A run stops scanning after this long and commits what it covered, so a scheduled run
+# always finishes before the next one starts; the following run resumes at the checkpoint.
+RUN_BUDGET_S = 150
+# The checkpoint also advances when it is this far behind head, even with no new payment,
+# so a quiet period cannot grow the scanned window without bound (commits stay rare).
+COMMIT_GAP = 50_000
 UA = {"User-Agent": "pod-gate-sync/1.0", "Content-Type": "application/json"}
 
 
@@ -120,13 +128,17 @@ def main():
     print(f"contract {ENDPOINT}  topic APICreditsPurchased  only")
     print(f"scanning {start}..{head} ({(head - start) // CHUNK + 1} chunks of {CHUNK} blocks)")
     if head - start > 500_000:
-        print(f"WARNING: {head - start} blocks behind — that is more than a normal 5-minute gap")
+        print(f"WARNING: {head - start} blocks behind — more than a normal gap between runs")
     found = []
-    cursor = start
-    while cursor <= head:
-        end = min(cursor + CHUNK - 1, head)
-        found.extend(get_logs(cursor, end))
-        cursor = end + 1
+    scanned_to = int(state["scannedTo"])
+    deadline = time.monotonic() + RUN_BUDGET_S
+    while scanned_to < head:
+        end = min(scanned_to + CHUNK, head)
+        found.extend(get_logs(scanned_to + 1, end))
+        scanned_to = end
+        if scanned_to < head and time.monotonic() >= deadline:
+            print(f"run budget spent; stopping after block {scanned_to:,} of {head:,} — the next run resumes there")
+            break
 
     fresh = []
     for log in found:
@@ -145,11 +157,10 @@ def main():
             }
         )
 
-    if not fresh:
-        print("no new payments; leaving checkpoint unchanged")
-        if repaired:
-            save(state, payments)
-            print(f"rewrote {FILE} with {repaired} repaired timestamp(s); checkpoint stays {state['scannedTo']}")
+    paused = scanned_to < head
+    lag = head - int(state["scannedTo"])
+    if not fresh and not repaired and not paused and lag <= COMMIT_GAP:
+        print(f"no new payments; checkpoint unchanged at {state['scannedTo']:,} ({lag:,} blocks behind head)")
         return
 
     for p in fresh:
@@ -160,10 +171,14 @@ def main():
             print(f"  WARNING no timestamp for {p['hash']} yet; the next run backfills it", flush=True)
 
     payments.extend(fresh)
-    state["scannedTo"] = head
+    state["scannedTo"] = scanned_to
     save(state, payments)
 
-    print(f"added {len(fresh)} payment(s); checkpoint now {head}")
+    if paused:
+        print(f"checkpoint now {scanned_to:,} of {head:,}; the next run continues from there")
+    else:
+        print(f"checkpoint now {head:,} (head)")
+    print(f"added {len(fresh)} payment(s)")
     for p in fresh:
         print("  +", p.get("ts"), p["block"], p["tokenAddress"], p["rawAmount"], p["hash"])
 
