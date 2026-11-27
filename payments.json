@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-11-27T11:09:57Z",
+  "generatedAt": "2026-11-27T19:55:36Z",
   "endpoint": "0x0009b5e129cbc8d731ba23d99e876faf517c257d",
-  "scannedTo": 62937008,
+  "scannedTo": 63094649,
   "coverage": "indexer for blocks <= 53366534, chain scan after",
   "payments": [
     {
